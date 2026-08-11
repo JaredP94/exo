@@ -63,6 +63,18 @@ def _gather(value: mx.array, group: mx.distributed.Group) -> mx.array:
     return mx.distributed.all_gather(value.reshape(1, -1), group=group)
 
 
+def _format_bfloat16_rank_summary(
+    rank: int,
+    minimum: float,
+    maximum: float,
+    all_finite: bool,
+) -> str:
+    return (
+        f"rank {rank} bfloat16 output: min={minimum:.6g} max={maximum:.6g} "
+        f"all_finite={all_finite}"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--heads", type=int, default=8)
@@ -149,6 +161,12 @@ def main() -> int:
         f"cross-device max-abs, float32 : {d32:.6g}   (gates, tol {args.tolerance:g})"
     )
     print(f"cross-device max-abs, bfloat16: {d16:.6g}   (context only)")
+    for peer_rank in range(n):
+        peer_bfloat16 = gathered16[peer_rank]
+        minimum = float(mx.min(peer_bfloat16).item())
+        maximum = float(mx.max(peer_bfloat16).item())
+        all_finite = bool(mx.all(mx.isfinite(peer_bfloat16)).item())
+        print(_format_bfloat16_rank_summary(peer_rank, minimum, maximum, all_finite))
 
     if d16 > 10 * args.tolerance:
         print(
