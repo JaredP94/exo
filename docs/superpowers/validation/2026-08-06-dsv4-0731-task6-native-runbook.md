@@ -476,11 +476,11 @@ a 43-layer discrete-routing MoE, because any nonzero distributed difference can
 eventually cross a routing boundary. In the chained 43-layer BF16 audit, layers 0-7 agreed exactly, layer 8 was the
 first mismatch (one token, token 0), and layers 9-42 all mismatched. At depth
 43, `max_abs=81`, mean absolute output was `1.92695`, and the reference scale
-was `3.93115`. The local evidence therefore supports this mechanism: small
-distributed numerical drift accumulates until a near-tied MoE top-k decision
-flips, after which the residual streams diverge qualitatively. This is a
-reproducible local explanation for the live conditioning failure, not a live
-two-node fix.
+was `3.93115`. The local evidence therefore supports this mechanism for
+distributed path divergence: small numerical drift accumulates until a
+near-tied MoE top-k decision flips, after which the residual streams diverge
+qualitatively. This is reproducible local characterization, not a live two-node
+fix and not a proven explanation for the live instruction-following failure.
 
 The earlier `--float32-hyper` layer-3 result (`max_abs=0.000487`) is a
 precision-stability result, not evidence of an independently broken
@@ -514,7 +514,8 @@ token, top-5 logprobs) returned `The` as top-1 with `cached_tokens=0`,
 returned 249 tokens with `finish_reason="stop"` and `cached_tokens=0`; the
 nonce appeared only inside unrelated translation/explanation text rather than
 as the exact requested output. Broad float32 therefore did not restore live
-prompt conditioning. The 16K and 32K requests both completed; the 32K request
+instruction following: the nonce was present, but only in unrelated
+translation/explanation text. The 16K and 32K requests both completed; the 32K request
 was the highest tested, and no 64K request was attempted. See the companion
 validation document for the complete prompt, completion, throughput, and RAM
 availability evidence.

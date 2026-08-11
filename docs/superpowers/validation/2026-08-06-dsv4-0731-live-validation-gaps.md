@@ -262,7 +262,7 @@ evidence. No further live test above 32K is permitted in this acceptance run.
 Revisit context management later, including leveraging OMLX TurboQuant to
 reduce long-prefill resource use before reconsidering 64K.
 
-## 2026-08-11 evidence correction
+## 2026-08-11 evidence correction (historical intermediate record)
 
 ### Task 5 cold-single verdict (superseded and failed)
 
@@ -288,10 +288,11 @@ completion, quoted with the captured whitespace and escaping preserved, was:
 '\n\nWe need to solve the equation:\n\n\\[\n\\log_2(x+1) + \\log_2(x+3) = 3\n\\]\n\n**Step 1: Combine the logarithms**\n\nUsing the property \\(\\log_b A + \\log_b B = \\log_b(AB)\\):\n\n\\[\n\\log_2[(x+1)(x+3)] = 3\n\\]\n\n**Step 2: Convert to exponential form**\n\n\\[\n(x+1)(x+3) = 2^3\n\\]\n\n\\[\n(x+1)(x+3) = 8\n\\]\n\n**Step 3: Expand and solve the quadratic**\n\n\\[\nx^2 + 4x + 3 = 8\n\\]\n\n\\[\nx^2 + 4x - 5 = 0\n\\]\n\nFactor:\n\n\\[\n(x+5)(x-1) = 0\n\\]\n\nSo:\n\n\\[\nx = -5 \\quad \\text{or} \\quad x = 1\n\\]\n\n**Step 4: Check for domain restrictions**\n\nThe original logarithms require:\n\n\\[\nx+1 > 0 \\quad \\Rightarrow \\quad x > -1\n\\]\n\\[\nx+3 > 0 \\quad \\Rightarrow'
 ```
 
-The nonce does not appear. This is a failed conditioning probe, not evidence
-that prefix caching caused the prior output; the prefix-cache fix remains
-regression-tested, but the Task 5 branch is unresolved and Tasks 7 and 8 were
-run independently below.
+The nonce did not appear in this earlier probe. This was a failed exact-output
+probe, not proof that prompt text was absent from the model input; it is
+superseded as the conditioning diagnosis by the later nonce completion quoted
+in the absolute-quality addendum below. The prefix-cache fix remains
+regression-tested, and Tasks 7 and 8 were run independently below.
 
 ### Full-suite gate
 
@@ -462,8 +463,11 @@ layer-3-only exception. The independent layer-3 mismatch above is superseded
 as the end-to-end finding: in the chained BF16 run, layers 0-7 agreed and layer
 8 was the first routing mismatch. That chained result is the one aligned with
 the depth-8/9 knee and is the accepted localization for the baseline path.
-The live nonce result remains unchanged: conditioning is confirmed broken, but
-this local chain has not yet been run end-to-end on the live two-rank instance.
+At the time of this local-chain entry, the live nonce result had been treated as
+conditioning failure. The later nonce completion shows the narrower and more
+accurate result: prompt text is reaching the model, but instruction following
+and answer quality are defective. This local chain has not established the
+cause of that behavior.
 
 ### 2026-08-11 precision policy and full-depth routing audit
 
@@ -495,10 +499,11 @@ results below are characterization. The chained 43-layer BF16 audit passed at la
 0-7; layer 8 was the first mismatch (one token, token 0), and every layer 9-42
 also mismatched. The final depth-43 state reached `max_abs=81`, with mean
 absolute output `1.92695` against a reference scale of `3.93115`. This gives a
-reproducible local mechanism for the live conditioning failure: accumulated
+reproducible local mechanism for distributed path divergence: accumulated
 distributed numerical drift eventually flips a near-tied MoE routing decision,
 after which the residual streams diverge qualitatively. It remains local
-evidence rather than a live two-node fix, and conditioning is still open.
+characterization rather than a live two-node fix, and it is not established as
+the cause of the live instruction-following failure.
 
 The broad-float32 43-layer routing audit did not meet the then-proposed
 zero-mismatch criterion. It kept the hidden state and hyper-connection path in
@@ -586,10 +591,53 @@ The response had `cached_tokens=0`, `completion_tokens=249`, and
 
 The literal nonce appears, satisfying the narrow substring check, but only
 inside unrelated translation/explanation text; the exact-output instruction
-failed. Together with the factual probe, this confirms that broad float32 did
-not restore prompt conditioning or deployed-path quality. The routing drift is
-therefore a real numerical characterization, but it is not by itself proven to
-be the sole cause of the live conditioning failure.
+failed. This proves that prompt text reaches the model sufficiently for it to
+quote and discuss the nonce. The live defect is instruction following and
+answer quality, not proven loss of prompt information. The routing drift is
+therefore a real numerical characterization, but it is not established as the
+cause of this live behavior.
+
+## 2026-08-11 offline tokenizer provenance audit
+
+No cluster, EXO instance, model load, or numerical experiment was used for this
+audit. The checkpoint's `config.json` declares `model_type="deepseek_v4"` and
+`vocab_size=129280`. Its `tokenizer_config.json` declares
+`tokenizer_class="PreTrainedTokenizerFast"` but has `chat_template=null` and
+does not carry an `added_tokens_decoder` mapping. The authoritative marker IDs
+in `tokenizer.json` are:
+
+| Marker | Checkpoint `tokenizer.json` | Runtime tokenizer |
+|---|---:|---:|
+| `<｜begin▁of▁sentence｜>` | 0 | 0 |
+| `<｜User｜>` | 128803 | 128803 |
+| `<｜Assistant｜>` | 128804 | 128804 |
+| `<think>` | 128821 | 128821 |
+| `</think>` | 128822 | 128822 |
+| `｜DSML｜` | 128825 | 128825 |
+
+The runtime object is `mlx_lm.tokenizer_utils.TokenizerWrapper` wrapping
+`transformers.tokenization_utils_tokenizers.TokenizersBackend`, with
+`name_or_path` pointing at this checkpoint. It emits the known warning that
+Transformers does not recognize the checkpoint config and that MLX-LM is using
+its generic tokenizer fallback. That fallback still reads this checkpoint's
+`tokenizer.json`; the six runtime IDs above match exactly. The fallback is real,
+but this audit finds no special-token ID substitution.
+
+The checkpoint has no tokenizer-supplied chat template, and the runtime
+`chat_template` is also `null`. For a model ID containing `deepseek-v4`, EXO
+selects its vendored `deepseek_v4_encoding.encode_messages` path before calling
+the generic tokenizer template. For the factual probe, that encoder rendered:
+
+```text
+<｜begin▁of▁sentence｜><｜User｜>The capital of France is<｜Assistant｜></think>
+```
+
+This is therefore not evidence of a generic chat template silently replacing
+the V4 role format. The offline result rules out the proposed wrong-special-ID
+diagnosis and the embedding-vocabulary mismatch: the embedding and `lm_head`
+both have shape `[129280, 1024]`, matching `config.json`'s `vocab_size`.
+The remaining quality/instruction-following defect needs a separate prompt or
+model-behavior investigation; numerics work is stopped for this branch.
 
 ### Context window measurements
 
