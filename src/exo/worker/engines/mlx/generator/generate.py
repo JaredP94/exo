@@ -555,9 +555,7 @@ def mlx_generate(
         raw_input_ids=task.raw_input_ids,
     )
     if task.raw_input_ids is None:
-        all_prompt_tokens = fix_unmatched_think_end_tokens(
-            all_prompt_tokens, tokenizer
-        )
+        all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None
