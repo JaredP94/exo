@@ -2,6 +2,7 @@ from typing import Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
+import mlx_lm.models.deepseek_v4 as dsv4
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
@@ -13,9 +14,43 @@ from exo.worker.engines.mlx.deepseek_v4_0731_model import (
     DeepseekV40731Model,
     DeepseekV40731MoEGate,
     SplitOutputQuantizedLinear,
+    install_deepseek_v4_0731_float32_backbone,
     install_deepseek_v4_0731_prefill_attention,
     normalize_deepseek_v4_0731_weights,
 )
+
+
+def test_float32_backbone_casts_each_decoder_block_boundary() -> None:
+    original = dsv4.DeepseekV4Block.__call__
+    had_flag = hasattr(dsv4, "_exo_dsv4_float32_backbone_patched")
+    if had_flag:
+        delattr(dsv4, "_exo_dsv4_float32_backbone_patched")
+    seen: dict[str, mx.Dtype] = {}
+
+    def probe(
+        _self: object,
+        hidden: mx.array,
+        _cache: object,
+        _input_ids: mx.array,
+    ) -> mx.array:
+        seen["input"] = hidden.dtype
+        return hidden.astype(mx.bfloat16)
+
+    try:
+        dsv4.DeepseekV4Block.__call__ = probe  # type: ignore[method-assign]
+        install_deepseek_v4_0731_float32_backbone()
+        hidden = mx.zeros((1, 1, 4, 8), dtype=mx.bfloat16)
+        output = dsv4.DeepseekV4Block.__call__(
+            object(), hidden, None, mx.zeros((1, 1), dtype=mx.int32)
+        )
+        assert seen["input"] == mx.float32
+        assert output.dtype == mx.float32
+    finally:
+        dsv4.DeepseekV4Block.__call__ = original  # type: ignore[method-assign]
+        if had_flag:
+            dsv4._exo_dsv4_float32_backbone_patched = True  # type: ignore[attr-defined]
+        elif hasattr(dsv4, "_exo_dsv4_float32_backbone_patched"):
+            delattr(dsv4, "_exo_dsv4_float32_backbone_patched")
 
 
 def _args(*, swiglu_limit: float = 10.0) -> ModelArgs:

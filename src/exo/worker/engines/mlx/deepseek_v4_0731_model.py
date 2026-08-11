@@ -239,6 +239,34 @@ def install_deepseek_v4_sdpa_float32() -> None:
     _dsv4._exo_sdpa_float32_patched = True  # pyright: ignore[reportAttributeAccessIssue]
 
 
+def install_deepseek_v4_0731_float32_backbone() -> None:
+    """Keep the hidden state float32 across every 0731 decoder block.
+
+    This is an opt-in experiment for measuring deployed-path quality. It does
+    not dequantize checkpoint weights; it only prevents bfloat16 state from
+    being carried across block boundaries, matching the broad parity harness.
+    """
+    import mlx_lm.models.deepseek_v4 as _dsv4
+
+    if getattr(_dsv4, "_exo_dsv4_float32_backbone_patched", False):
+        return
+    block_type = _dsv4.DeepseekV4Block
+    original = cast("Callable[..., mx.array]", block_type.__call__)
+
+    def _float32_block(
+        self: object,
+        hidden: mx.array,
+        cache: object,
+        input_ids: mx.array,
+    ) -> mx.array:
+        return original(self, hidden.astype(mx.float32), cache, input_ids).astype(
+            mx.float32
+        )
+
+    block_type.__call__ = _float32_block  # type: ignore[method-assign]
+    _dsv4._exo_dsv4_float32_backbone_patched = True  # pyright: ignore[reportAttributeAccessIssue]
+
+
 class DeepseekV40731MoEGate(PinnedMoEGate):
     """0731 gate with OMLX-equivalent routing arithmetic and selection."""
 

@@ -1,6 +1,7 @@
 """Strict EXO loading for the DeepSeek V4 Flash 0731 backbone."""
 
 import copy
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,6 +18,7 @@ from exo.worker.engines.mlx.deepseek_v4_0731_config import (
 )
 from exo.worker.engines.mlx.deepseek_v4_0731_model import (
     DeepseekV40731Model,
+    install_deepseek_v4_0731_float32_backbone,
     install_deepseek_v4_0731_prefill_attention,
     install_deepseek_v4_sdpa_float32,
 )
@@ -84,6 +86,8 @@ def load_exo_model(
         )
     install_deepseek_v4_0731_prefill_attention(model)
     install_deepseek_v4_sdpa_float32()
+    if os.environ.get("EXO_DSV4_FLOAT32_BACKBONE") == "1":
+        install_deepseek_v4_0731_float32_backbone()
     audit_deepseek_v4_0731_quantization(model, checkpoint.realized_quantization)
     logger.warning(
         "deepseek_v4_0731_backbone loaded; "
