@@ -487,9 +487,11 @@ insufficient and was worse than baseline: depths 1, 2, 4, 8, and 16 reported
 `0.015625`, `0.0234375`, `0.160156`, `0.270508`, and `1.01562`. Gate-only
 casting is therefore not a validated production fix.
 
-The acceptance criterion is now exact expert-set agreement, not a per-layer
-floating-point tolerance: for a fixed input, the sorted top-k expert index sets
-must match at every layer. The chained 43-layer BF16 audit passed at layers
+The diagnostic criterion used for this local audit was exact expert-set
+agreement, not a per-layer floating-point tolerance: for a fixed input, the
+sorted top-k expert index sets must match at every layer. That criterion is not
+a live-quality acceptance gate for a 43-layer discrete-routing MoE; the chained
+results below are characterization. The chained 43-layer BF16 audit passed at layers
 0-7; layer 8 was the first mismatch (one token, token 0), and every layer 9-42
 also mismatched. The final depth-43 state reached `max_abs=81`, with mean
 absolute output `1.92695` against a reference scale of `3.93115`. This gives a
@@ -498,17 +500,17 @@ distributed numerical drift eventually flips a near-tied MoE routing decision,
 after which the residual streams diverge qualitatively. It remains local
 evidence rather than a live two-node fix, and conditioning is still open.
 
-The broad-float32 43-layer routing audit did not meet the zero-mismatch
-criterion. It kept the hidden state and hyper-connection path in float32 on
-both local ranks while leaving quantized weights quantized. Layers 0-24 agreed;
-layer 25 was the first mismatch, and layers 26-42 also mismatched. Depth 43
-was `max_abs=10.1784`, mean absolute delta `0.351607`, reference scale
-`3.20986`. Broad float32 therefore removes the early knee and greatly reduces
-drift through depth 16, but it is not yet a known-good end-to-end configuration
-and was not used for a live nonce probe.
-Because the broad configuration failed the routing gate, the corresponding live
-16K/32K memory window was not run; the existing hard 32K ceiling and single
-64K watchdog panic remain the operational record.
+The broad-float32 43-layer routing audit did not meet the then-proposed
+zero-mismatch criterion. It kept the hidden state and hyper-connection path in
+float32 on both local ranks while leaving quantized weights quantized. Layers
+0-24 agreed; layer 25 was the first mismatch, and layers 26-42 also mismatched.
+Depth 43 was `max_abs=10.1784`, mean absolute delta `0.351607`, reference scale
+`3.20986`. This result is retained as numerical characterization, not as a
+failed live-quality fix: exact zero routing mismatches at depth 43 is not a
+realistic acceptance gate for a discrete top-k MoE because any nonzero path
+difference can eventually cross a routing boundary. Broad float32 delayed the
+first mismatch from layer 8 to layer 25 and greatly reduced drift through depth
+16, but it cannot establish bit-identical execution.
 
 The gate-only result is intentionally counter-intuitive: casting MoE gate
 inputs to float32 made depth-16 drift worse (`1.01562` versus BF16 `0.90625`).
@@ -524,3 +526,87 @@ read as a precision-stability result: the wider float32 path bought enough
 precision to keep a routing decision stable. It did not prove that
 hyper-connections were independently defective, and it is not enabled in
 production.
+
+## 2026-08-11 absolute quality and broad-float32 live validation
+
+The previous routing gate was removed before live validation. The question is
+whether the deployed path produces correct output, not whether a distributed
+execution path remains identical to a single-node reference through all 43
+discrete-routing layers.
+
+The live instance used two Tensor/MlxJaccl ranks, with
+`EXO_DSV4_FLOAT32_BACKBONE=1`, quantized weights left quantized, and
+`use_prefix_cache=false` for every request. The runners were healthy and Ready
+before and after the measurements.
+
+### Absolute factual probe
+
+Request:
+
+```json
+{"model":"Jundot/DeepSeek-V4-Flash-0731-oQ4e-mtp","messages":[{"role":"user","content":"The capital of France is"}],"max_tokens":1,"temperature":0,"enable_thinking":false,"use_prefix_cache":false,"logprobs":true,"top_logprobs":5,"stream":false}
+```
+
+The response had `cached_tokens=0`, `completion_tokens=1`, and
+`finish_reason="length"`. The top-5 were:
+
+```text
+The   -0.03501701354980469
+1     -3.539815902709961
+ The  -6.872257232666016
+用户  -6.969638824666016
+**    -7.276315689086914
+```
+
+`Paris` was absent. The deployed broad-float32 two-rank path therefore fails
+this absolute factual-quality probe; the result is not merely a
+sharded-versus-unsharded disagreement.
+
+### Cold nonce probe
+
+Request:
+
+```text
+Return exactly this string and nothing else: WIRE-4C9E7A1B
+```
+
+The response had `cached_tokens=0`, `completion_tokens=249`, and
+`finish_reason="stop"`. The complete completion was:
+
+```text
+好的，用户要求将“Return exactly this string and nothing else: WIRE-4C9E7A1B”翻译成中文。这是一个非常直接的指令，核心是翻译这个特定的字符串。
+
+我需要先理解这个字符串的性质。“WIRE-4C9E7A1B”看起来像是一个代码、序列号或标识符，由字母和数字组成。对于这类技术性字符串，翻译时通常需要保持原样，因为它们是专有名称或代码，不能意译。
+
+用户明确要求“Return exactly this string and nothing else”，这意味着我的回复必须极其简洁，只输出翻译结果，不能有任何解释、补充或格式变化。翻译策略就是：将指令部分“Return exactly this string and nothing else”翻译成中文，而将后面的字符串“WIRE-4C9E7A1B”原样保留。
+
+所以，最终的中文翻译应该是“只返回这个字符串，不要其他任何内容：WIRE-4C9E7A1B”。这样既完成了翻译指令，又严格遵循了“只输出这个”的要求。
+</think>只返回这个字符串，不要其他任何内容：WIRE-4C9E7A1B
+```
+
+The literal nonce appears, satisfying the narrow substring check, but only
+inside unrelated translation/explanation text; the exact-output instruction
+failed. Together with the factual probe, this confirms that broad float32 did
+not restore prompt conditioning or deployed-path quality. The routing drift is
+therefore a real numerical characterization, but it is not by itself proven to
+be the sole cause of the live conditioning failure.
+
+### Context window measurements
+
+Both requests completed with `cached_tokens=0` and left both runners Ready:
+
+| Prompt tokens | Completion tokens | TTFT | Prefill | Decode |
+|---:|---:|---:|---:|---:|
+| 16,037 | 8 | `72.0219 s` | `222.668 tok/s` | `34.6579 tok/s` |
+| 32,034 | 8 | `181.4775 s` | `176.518 tok/s` | `32.7032 tok/s` |
+
+The 32K request completed successfully under broad float32. Available RAM
+reported by the API was 34.98 GB local and 46.25 GB remote before the context
+ladder, and 38.99 GB local and 50.29 GB remote after the 32K request. These are
+availability samples, not peak allocation measurements; Metal unified-memory
+RSS and page-reclamation samples are not reliable peak-model-memory evidence.
+No 64K request was attempted. The supported ceiling remains 32K, with the
+previous 64K watchdog-panic report retained as an operational hazard.
+
+Live tool calls remain unvalidated: the templating blocker means there is still
+zero live evidence for tool-call behavior.

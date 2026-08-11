@@ -469,9 +469,11 @@ sufficient: depths 1, 2, 4, 8, and 16 were `0.015625`, `0.0234375`,
 `0.160156`, `0.270508`, and `1.01562`, respectively, so gate-only casting is
 not a validated production fix.
 
-The acceptance criterion is exact sorted top-k expert-set agreement for a fixed
-input at every layer; the old single-layer float tolerance is diagnostic only.
-In the chained 43-layer BF16 audit, layers 0-7 agreed exactly, layer 8 was the
+The diagnostic criterion for this local audit was exact sorted top-k expert-set
+agreement for a fixed input at every layer; the old single-layer float tolerance
+is diagnostic only. Exact zero routing agreement is not a live-quality gate for
+a 43-layer discrete-routing MoE, because any nonzero distributed difference can
+eventually cross a routing boundary. In the chained 43-layer BF16 audit, layers 0-7 agreed exactly, layer 8 was the
 first mismatch (one token, token 0), and layers 9-42 all mismatched. At depth
 43, `max_abs=81`, mean absolute output was `1.92695`, and the reference scale
 was `3.93115`. The local evidence therefore supports this mechanism: small
@@ -485,16 +487,16 @@ precision-stability result, not evidence of an independently broken
 hyper-connection. The wider float32 path kept that routing decision stable; no
 production cast is enabled.
 
-The broad-float32 43-layer routing audit did not satisfy the zero-mismatch
-acceptance criterion. Layers 0-24 agreed exactly; layer 25 was the first
+The broad-float32 43-layer routing audit did not satisfy the then-proposed
+zero-mismatch criterion. Layers 0-24 agreed exactly; layer 25 was the first
 mismatch and layers 26-42 also mismatched. At depth 43 the broad-float32
 `max_abs` was `10.1784`, mean absolute delta `0.351607`, and reference scale
 `3.20986`. It removes the early knee and substantially reduces drift through
-depth 16, but it is not a known-good end-to-end configuration. No live nonce
-probe was run with it.
-Because the broad configuration failed the routing gate, the corresponding live
-16K/32K memory window was not run; retain the existing hard 32K ceiling and
-single 64K watchdog-panic record.
+depth 16. Exact zero routing mismatches at depth 43 is not a valid live-quality
+gate for a discrete top-k MoE: any nonzero distributed numerical difference can
+eventually cross a routing boundary. This is characterization of the system's
+numerical behavior, not a failed fix, and the live evidence is recorded in the
+absolute-quality addendum in the companion validation document.
 
 The gate-only result is counter-intuitive but informative: casting MoE gate
 inputs to float32 worsened depth-16 drift to `1.01562` versus BF16 `0.90625`.
@@ -504,3 +506,15 @@ sooner. Precision therefore needs to be applied upstream, where the hidden
 state disagreement is introduced, not only at the discrete decision point.
 Sinkhorn-only failed for the same structural reason because it did not remove
 the upstream disagreement before the residual path.
+
+The live broad-float32 run used the exact two-rank Tensor/MlxJaccl instance with
+`use_prefix_cache=false`. The factual probe (`The capital of France is`, one
+token, top-5 logprobs) returned `The` as top-1 with `cached_tokens=0`,
+`finish_reason="length"`, and no `Paris` in the top-5. The cold nonce probe
+returned 249 tokens with `finish_reason="stop"` and `cached_tokens=0`; the
+nonce appeared only inside unrelated translation/explanation text rather than
+as the exact requested output. Broad float32 therefore did not restore live
+prompt conditioning. The 16K and 32K requests both completed; the 32K request
+was the highest tested, and no 64K request was attempted. See the companion
+validation document for the complete prompt, completion, throughput, and RAM
+availability evidence.
