@@ -108,6 +108,9 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
 
     model: ModelId
     input: list[InputMessage]
+    # Debug-only prompt-construction escape hatch. The worker consumes these
+    # IDs directly instead of encoding the chat messages.
+    raw_input_ids: list[int] | None = None
     instructions: InputMessageContent | None = None
     max_output_tokens: int | None = None
     temperature: float | None = None
@@ -115,7 +118,9 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
     bench: bool = False
-    use_prefix_cache: bool = False
+    # Normal requests reuse shared prompt prefixes. Benchmark requests can
+    # explicitly disable this through BenchChatCompletionRequest.
+    use_prefix_cache: bool = True
     top_k: int | None = None
     stop: str | list[str] | None = None
     seed: int | None = None

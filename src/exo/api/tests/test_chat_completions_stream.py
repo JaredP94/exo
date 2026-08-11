@@ -146,6 +146,51 @@ class TestToolCallStreamDeltaShape:
         assert isinstance(delta["tool_calls"], list)
         assert delta["tool_calls"][0]["function"]["name"] == "get_weather"
 
+    async def test_parallel_tool_calls_get_distinct_ascending_indices(self):
+        """DeepSeek V4 emits several `<｜DSML｜invoke>` blocks inside one
+        `<｜DSML｜tool_calls>` block, so the adapter must serialize them as one
+        delta carrying several indexed entries. Without distinct ascending
+        indices an OpenAI client merges them into a single malformed call."""
+        chunks: list[PrefillProgressChunk | ErrorChunk | ToolCallChunk | TokenChunk] = [
+            ToolCallChunk(
+                model=_TEST_MODEL,
+                tool_calls=[
+                    ToolCallItem(
+                        id="call_1", name="get_weather", arguments='{"city":"Paris"}'
+                    ),
+                    ToolCallItem(
+                        id="call_2", name="get_time", arguments='{"city":"Rome"}'
+                    ),
+                ],
+                usage=_make_usage(),
+            ),
+        ]
+        lines: list[str] = []
+        async for event in generate_chat_stream(
+            CommandId("test-cmd-parallel-tools"), _stream(chunks)
+        ):
+            lines.append(event)
+
+        events = _parse_data_events(lines)
+        assert len(events) == 1
+        choice = events[0]["choices"][0]
+        delta = choice["delta"]
+        _assert_delta_spec_compliant(delta)
+
+        assert choice["finish_reason"] == "tool_calls"
+        calls = delta["tool_calls"]
+        assert [call["index"] for call in calls] == [0, 1]
+        assert [call["function"]["name"] for call in calls] == [
+            "get_weather",
+            "get_time",
+        ]
+        assert [call["id"] for call in calls] == ["call_1", "call_2"]
+        # Arguments stay per-call JSON; concatenating them would be invalid.
+        for call in calls:
+            json.loads(call["function"]["arguments"])
+
+        assert sum(part.count("data: [DONE]") for part in lines) == 1
+
 
 class TestErrorStreamShape:
     async def test_error_chunk_response_has_no_nulls(self):

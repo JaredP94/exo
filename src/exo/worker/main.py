@@ -61,6 +61,8 @@ from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
 from exo.worker.runner.supervisor import RunnerSupervisor
 
+CONNECTION_POLL_INTERVAL_SECONDS = 10
+
 
 class Worker:
     def __init__(
@@ -388,10 +390,16 @@ class Worker:
 
     async def _poll_connection_updates(self):
         while True:
-            edges = set(
-                conn.edge for conn in self.state.topology.out_edges(self.node_id)
-            )
-            conns: defaultdict[NodeId, set[str]] = defaultdict(set)
+            await self._poll_connection_updates_once()
+            await anyio.sleep(CONNECTION_POLL_INTERVAL_SECONDS)
+
+    async def _poll_connection_updates_once(self):
+        peer_count = sum(node_id != self.node_id for node_id in self.state.node_network)
+        logger.debug(f"connection poll: {peer_count} peer(s)")
+
+        edges = set(conn.edge for conn in self.state.topology.out_edges(self.node_id))
+        conns: defaultdict[NodeId, set[str]] = defaultdict(set)
+        try:
             async for ip, nid in check_reachable(
                 self.state.topology,
                 self.node_id,
@@ -415,18 +423,20 @@ class Worker:
                             conn=Connection(source=self.node_id, sink=nid, edge=edge)
                         )
                     )
+        except Exception:
+            # Keep the ten-second poll task alive if an unexpected failure
+            # escapes the per-interface reachability probes.
+            logger.exception("connection poll failed")
 
-            for conn in self.state.topology.out_edges(self.node_id):
-                if not isinstance(conn.edge, SocketConnection):
-                    continue
-                # ignore mDNS discovered connections
-                if conn.edge.sink_multiaddr.port != self.api_port:
-                    continue
-                if (
-                    conn.sink not in conns
-                    or conn.edge.sink_multiaddr.ip_address not in conns[conn.sink]
-                ):
-                    logger.debug(f"ping failed to discover {conn=}")
-                    await self.event_sender.send(TopologyEdgeDeleted(conn=conn))
-
-            await anyio.sleep(10)
+        for conn in self.state.topology.out_edges(self.node_id):
+            if not isinstance(conn.edge, SocketConnection):
+                continue
+            # ignore mDNS discovered connections
+            if conn.edge.sink_multiaddr.port != self.api_port:
+                continue
+            if (
+                conn.sink not in conns
+                or conn.edge.sink_multiaddr.ip_address not in conns[conn.sink]
+            ):
+                logger.debug(f"ping failed to discover {conn=}")
+                await self.event_sender.send(TopologyEdgeDeleted(conn=conn))

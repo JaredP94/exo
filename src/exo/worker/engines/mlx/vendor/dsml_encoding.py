@@ -1,6 +1,7 @@
+import ast
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 from mlx_lm.chat_templates import deepseek_v32
 
@@ -56,18 +57,74 @@ def encode_messages(
 
 
 _INVOKE_PATTERN = re.compile(
-    rf"<{re.escape(DSML_TOKEN)}invoke\s+name=\"([^\"]+)\">"
+    rf"<{re.escape(DSML_TOKEN)}invoke\s+name=\"([^\"]+)\"\s*>"
     rf"(.*?)"
     rf"</{re.escape(DSML_TOKEN)}invoke>",
     re.DOTALL,
 )
 
 _PARAM_PATTERN = re.compile(
-    rf"<{re.escape(DSML_TOKEN)}parameter\s+name=\"([^\"]+)\"\s+string=\"(true|false)\">"
+    rf"<{re.escape(DSML_TOKEN)}parameter\s+name=\"([^\"]+)\""
+    rf"\s+string=\"(true|false)\"\s*>"
     rf"(.*?)"
     rf"</{re.escape(DSML_TOKEN)}parameter>",
     re.DOTALL,
 )
+
+
+def _decode_dsml_value(raw: str, is_string: bool) -> object:
+    """Decode one DSML parameter value, mirroring OMLX's `_decode_value`.
+
+    Models pad values with a single newline before the closing tag. Trim that
+    and only that, so intentional surrounding whitespace inside a string value
+    survives. String parameters are returned verbatim. Non-string parameters are
+    JSON literals, with `ast.literal_eval` as a fallback for the Python-style
+    literals models occasionally emit.
+
+    Error handling rationale: none of the failures below are exceptional, so all
+    are handled here rather than raised. Whatever this returns is re-serialized
+    by the caller with `json.dumps` into `ToolCallItem.arguments`, and
+    `parse_dsml_output` is called without a try/except from
+    `model_output_parsers._try_parse_tool_call` — which is itself inside the
+    runner's generation loop. An exception here would therefore not merely spoil
+    one tool call, it would tear down generation. So any value that cannot be
+    re-serialized as strict JSON is returned as text instead, which is the
+    documented contract for output this parser cannot make sense of.
+
+    Two distinct failures need that treatment: types `json.dumps` rejects
+    outright (`ast.literal_eval` happily produces sets, bytes and complex
+    numbers), and non-finite floats, which `json.loads` accepts via JSON's
+    `Infinity`/`NaN` extensions and `json.dumps` would emit back as tokens no
+    strict client can parse. `allow_nan=False` turns the second into an error we
+    can catch alongside the first.
+
+    The `ValueError` caught below is deliberately broader than the reference
+    implementation's `json.JSONDecodeError`: a numeric literal above CPython's
+    `int_max_str_digits` limit raises a bare `ValueError`, which would otherwise
+    escape. Do not narrow it.
+    """
+    if raw.startswith("\n"):
+        raw = raw[1:]
+    if raw.endswith("\n"):
+        raw = raw[:-1]
+
+    if is_string:
+        return raw
+
+    decoded: object
+    try:
+        decoded = cast(object, json.loads(raw))
+    except ValueError:  # includes json.JSONDecodeError
+        try:
+            decoded = cast(object, ast.literal_eval(raw))
+        except (ValueError, SyntaxError):
+            return raw
+
+    try:
+        _ = json.dumps(decoded, allow_nan=False)
+    except (TypeError, ValueError):
+        return raw
+    return decoded
 
 
 def parse_dsml_output(text: str) -> list[ToolCallItem] | None:
@@ -86,19 +143,13 @@ def parse_dsml_output(text: str) -> list[ToolCallItem] | None:
         func_name = invoke_match.group(1)
         invoke_body = invoke_match.group(2)
 
-        args: dict[str, Any] = {}
+        args: dict[str, object] = {}
         for param_match in _PARAM_PATTERN.finditer(invoke_body):
             param_name = param_match.group(1)
             is_string = param_match.group(2) == "true"
             param_value = param_match.group(3)
 
-            if is_string:
-                args[param_name] = param_value
-            else:
-                try:
-                    args[param_name] = json.loads(param_value)
-                except (json.JSONDecodeError, ValueError):
-                    args[param_name] = param_value
+            args[param_name] = _decode_dsml_value(param_value, is_string)
 
         tool_calls.append(
             ToolCallItem(

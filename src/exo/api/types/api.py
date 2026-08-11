@@ -106,6 +106,8 @@ class TopLogprobItem(BaseModel):
 
 class LogprobsContentItem(BaseModel):
     token: str
+    # Diagnostic-only; populated by the API adapter when EXO_DEBUG_TOKEN_IDS=1.
+    token_id: int | None = None
     logprob: float
     bytes: list[int] | None = None
     top_logprobs: list[TopLogprobItem]
@@ -222,6 +224,9 @@ class StreamOptions(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: ModelId
+    # Debug-only escape hatch for prompt-construction diagnosis. When enabled
+    # by the runner environment, this bypasses chat-template rendering.
+    raw_input_ids: list[int] | None = None
     frequency_penalty: float | None = None
     messages: list[ChatCompletionMessage]
     logit_bias: dict[str, int] | None = None

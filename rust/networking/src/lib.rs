@@ -20,7 +20,11 @@ pub fn is_valid_zid(identity: &str) -> bool {
         && identity.len() <= 32
 }
 
-pub fn cfg(identity: &str, listen_port: u16) -> Result<zenoh::Config> {
+pub fn cfg(
+    identity: &str,
+    listen_port: u16,
+    bootstrap_endpoints: &[String],
+) -> Result<zenoh::Config> {
     assert!(is_valid_zid(identity));
     assert!(identity.len() <= 32);
     assert!(listen_port != 0, "must used defined listen port");
@@ -32,6 +36,10 @@ pub fn cfg(identity: &str, listen_port: u16) -> Result<zenoh::Config> {
     cfg.insert_json5("scouting/multicast/enabled", "false")?;
     cfg.insert_json5("scouting/multicast/autoconnect", "[]")?;
     cfg.insert_json5("scouting/gossip/multihop", "true")?;
+    // Rust's debug representation for a Vec<String> is a JSON5-compatible
+    // array of quoted strings, so this does not add a networking dependency
+    // solely to serialize the endpoint list.
+    cfg.insert_json5("connect/endpoints", &format!("{bootstrap_endpoints:?}"))?;
     cfg.insert_json5("adminspace/enabled", "true")?;
     //cfg.insert_json5("transport/link/tx/batch_size", "9216")?;
     cfg.insert_json5("transport/link/rx/buffer_size", "16777216")?;
@@ -58,7 +66,7 @@ pub async fn open(
     discovery_service_port: u16,
 ) -> Result<Session> {
     assert!(listen_port != 0, "must used defined listen port");
-    let namespace: [u8; 8] = {
+    let discovery_namespace: [u8; 8] = {
         blake3::hash(namespace.as_bytes()).as_bytes()[..8]
             .try_into()
             .expect("8 is equal to 8")
@@ -71,8 +79,13 @@ pub async fn open(
         .await?;
     let z = zenoh::session::init(runtime.clone().into()).await?;
     runtime.start().await?;
-    let mut discovery =
-        Discovery::new(z.zid(), namespace, listen_port, discovery_service_port).await?;
+    let mut discovery = Discovery::new(
+        z.zid(),
+        discovery_namespace,
+        listen_port,
+        discovery_service_port,
+    )
+    .await?;
     let _jh = Arc::new(AbortOnDrop(tokio::task::spawn(async move {
         loop {
             let Ok(discovered) = discovery.next().await.inspect_err(|e| {
@@ -99,7 +112,11 @@ pub async fn open(
                 .await;
         }
     })));
-    Ok(Session { z, _jh })
+    Ok(Session {
+        z,
+        namespace: namespace.to_owned(),
+        _jh,
+    })
 }
 
 struct AbortOnDrop(JoinHandle<()>);
@@ -112,5 +129,23 @@ impl Drop for AbortOnDrop {
 #[derive(Clone)]
 pub struct Session {
     pub z: ZSession,
+    pub namespace: String,
     _jh: Arc<AbortOnDrop>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cfg_sets_explicit_zenoh_bootstrap_endpoints() {
+        let endpoints = vec!["tcp/[fe80::1%12]:52414".to_owned()];
+
+        let cfg = cfg("a", 52414, &endpoints).unwrap();
+
+        assert_eq!(
+            cfg.get_json("connect/endpoints").unwrap(),
+            r#"["tcp/[fe80::1%12]:52414"]"#
+        );
+    }
 }

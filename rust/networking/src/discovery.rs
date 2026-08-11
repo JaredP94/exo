@@ -18,6 +18,13 @@ use zenoh::config::ZenohId;
 const GROUP: Ipv6Addr = Ipv6Addr::new(0xff12, 0, 0, 0, 0, 0, 0xe0a1, 0xde89);
 const MAGIC: [u8; 3] = *b"EXO";
 
+fn is_transient_discovery_send_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkUnreachable
+    )
+}
+
 pub struct Discovery {
     sock: Arc<UdpSocket>,
     ifaces: Arc<Mutex<Vec<SocketAddrV6>>>,
@@ -249,14 +256,21 @@ impl Discovery {
 
         let addrs = self.ifaces.lock().clone();
         debug!("announcing Hello({nonce:?}) to {addrs:?}");
-        // rev so .remove() doesn't break things
-        for (i, addr) in addrs.into_iter().enumerate().rev() {
+        for addr in addrs.into_iter().rev() {
+            if let Err(e) =
+                socket2::SockRef::from(self.sock.as_ref()).set_multicast_if_v6(addr.scope_id())
+            {
+                debug!("failed to select discovery interface {addr}: {e}");
+                continue;
+            }
             match self.sock.send_to(&buf, addr).await {
                 Ok(bytes) => trace!("sent {bytes} to {addr}"),
-                Err(e) if e.kind() == io::ErrorKind::HostUnreachable => {
-                    debug!("disabling discovery address {addr}: {e}");
-                    _ = self.ifaces.lock().swap_remove(i);
+                Err(e) if is_transient_discovery_send_error(&e) => {
+                    debug!("failed to reach {addr}; will retry: {e}");
                 }
+                // Interface availability is owned by netwatcher. Keep failed
+                // destinations for the next tick until the watcher removes
+                // the interface instead of disabling them after one send.
                 Err(e) => debug!("failed to reach {addr}: {e}"),
             }
         }
@@ -337,3 +351,37 @@ impl Message for WhatsUp {
     const KIND: Kind = Kind::WhatsUp;
 }
 impl_alloc!(WhatsUp);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn announce_selects_destination_scope_as_multicast_interface() {
+        let discovery = Discovery::new(ZenohId::default(), [0; 8], 52414, 0)
+            .await
+            .unwrap();
+        let loopback_index = 1;
+        discovery.ifaces.lock().clear();
+        discovery
+            .ifaces
+            .lock()
+            .push(SocketAddrV6::new(GROUP, 52413, 0, loopback_index));
+
+        discovery.announce().await.unwrap();
+
+        assert_eq!(
+            socket2::SockRef::from(discovery.sock.as_ref())
+                .multicast_if_v6()
+                .unwrap(),
+            loopback_index
+        );
+    }
+
+    #[test]
+    fn transient_send_failures_do_not_disable_discovery_interfaces() {
+        let error = io::Error::from(io::ErrorKind::HostUnreachable);
+
+        assert!(is_transient_discovery_send_error(&error));
+    }
+}

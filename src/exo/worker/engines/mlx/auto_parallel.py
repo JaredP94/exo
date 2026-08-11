@@ -904,6 +904,24 @@ def _shard_v4_attention_heads(
     attn.n_heads = o_groups * hpg_per_rank
 
 
+def _assert_v4_attention_shard_contract(attn: V4Attention, layer_id: int) -> None:
+    """Assert that wo_a per-group input width matches sharded group_feat."""
+    wo_a = attn.wo_a
+    weight = getattr(wo_a, "weight", None)
+    if weight is None or not attn.n_groups:
+        return
+    group_feat = (attn.n_heads * attn.head_dim) // attn.n_groups
+    wo_a_per_group_width = int(weight.shape[-1])  # pyright: ignore[reportAny]
+    if isinstance(wo_a, nn.QuantizedLinear):
+        bits = int(getattr(wo_a, "bits", 4))
+        ratio = 32 // bits
+        wo_a_per_group_width *= ratio
+    assert group_feat == wo_a_per_group_width, (
+        f"Layer {layer_id} V4 attention wo_a shape mismatch: sharded group_feat={group_feat} "
+        f"vs wo_a per-group width={wo_a_per_group_width}"
+    )
+
+
 class DeepseekV4ShardingStrategy(TensorParallelShardingStrategy):
     def shard_model(
         self,
@@ -918,6 +936,7 @@ class DeepseekV4ShardingStrategy(TensorParallelShardingStrategy):
             # Head-parallel attention with interleaved-per-group sharding.
             _shard_v4_attention_heads(layer.attn, self.N, self.group.rank())
             self.sharded_to_all_linear_in_place(layer.attn.wo_a)
+            _assert_v4_attention_shard_contract(layer.attn, i)
             layer.attn.wo_b = _AllSumLinear(layer.attn.wo_b, self.group)  # type: ignore
 
             ffn = layer.ffn

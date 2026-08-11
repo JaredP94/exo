@@ -47,6 +47,11 @@ _MEMORY_THRESHOLD = float(
     os.environ.get("EXO_MEMORY_THRESHOLD", _default_memory_threshold())
 )
 
+# 32K is the supported prompt ceiling for this deployment. The 64K probe
+# caused a host watchdog panic, so the raw diagnostic path must fail closed
+# before an oversized token array reaches the embedding or prefill kernels.
+MAX_RAW_INPUT_TOKENS = 32_768
+
 
 class CacheSnapshot:
     """Snapshot of states at a known token position."""
@@ -316,6 +321,7 @@ class KVPrefixCache:
         model: Model,
         prompt_tokens: mx.array,
         media_regions: list["MediaRegion"] | None = None,
+        use_prefix_cache: bool = True,
     ) -> tuple[KVCacheType, mx.array, int | None, bool]:
         """Get KV cache for prompt, returning remaining tokens to prefill.
 
@@ -334,6 +340,9 @@ class KVPrefixCache:
         a cached media region whose content_hash differs from the query's, the
         match is truncated to the start of that region.
         """
+        if not use_prefix_cache:
+            return make_kv_cache(model), prompt_tokens, None, False
+
         max_length = len(prompt_tokens)
         query_regions = media_regions or []
 
@@ -501,13 +510,47 @@ def trim_cache(
             c.trim(num_tokens)
 
 
-def encode_prompt(tokenizer: TokenizerWrapper, prompt: str) -> mx.array:
+def encode_prompt(
+    tokenizer: TokenizerWrapper,
+    prompt: str,
+    *,
+    raw_input_ids: list[int] | None = None,
+) -> mx.array:
     """Encode a prompt string to token array.
 
     For chat-templated prompts (which have their own structure markers like
     <|im_user|>, <|im_middle|>, etc.), we should NOT add BOS/EOS tokens as
     that would corrupt the prompt structure.
     """
+    if raw_input_ids is not None:
+        if os.environ.get("EXO_ENABLE_RAW_INPUT_IDS_DEBUG") != "1":
+            raise ValueError(
+                "raw_input_ids is debug-only; set EXO_ENABLE_RAW_INPUT_IDS_DEBUG=1 "
+                "to enable it"
+            )
+        if not raw_input_ids:
+            raise ValueError("raw_input_ids must contain at least one token")
+        if len(raw_input_ids) > MAX_RAW_INPUT_TOKENS:
+            raise ValueError(
+                "raw_input_ids exceeds the maximum supported length of "
+                f"{MAX_RAW_INPUT_TOKENS} tokens"
+            )
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+        if not isinstance(vocab_size, int) or vocab_size <= 0:
+            raise ValueError(
+                "raw_input_ids requires a tokenizer with a positive vocab_size"
+            )
+        invalid_token = next(
+            (token_id for token_id in raw_input_ids if not 0 <= token_id < vocab_size),
+            None,
+        )
+        if invalid_token is not None:
+            raise ValueError(
+                f"raw_input_ids contains token id {invalid_token} outside tokenizer "
+                f"vocabulary range [0, {vocab_size})"
+            )
+        return mx.array(raw_input_ids)
+
     # Chat templates define their own structure - don't add BOS/EOS
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
     return mx.array(prompt_tokens)

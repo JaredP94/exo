@@ -1,6 +1,7 @@
 """OpenAI Chat Completions API adapter for converting requests/responses."""
 
 import base64
+import os
 import re
 import time
 from collections.abc import AsyncGenerator
@@ -153,6 +154,7 @@ async def chat_request_to_text_generation(
         input=input_messages
         if input_messages
         else [InputMessage(role="user", content=InputMessageContent(""))],
+        raw_input_ids=request.raw_input_ids,
         instructions=InputMessageContent(instructions) if instructions else None,
         max_output_tokens=request.max_tokens,
         temperature=request.temperature,
@@ -189,6 +191,11 @@ def chunk_to_response(
             content=[
                 LogprobsContentItem(
                     token=chunk.text,
+                    token_id=(
+                        chunk.token_id
+                        if os.environ.get("EXO_DEBUG_TOKEN_IDS") == "1"
+                        else None
+                    ),
                     logprob=chunk.logprob,
                     top_logprobs=chunk.top_logprobs or [],
                 )
@@ -331,6 +338,11 @@ async def collect_chat_response(
                     logprobs_content.append(
                         LogprobsContentItem(
                             token=chunk.text,
+                            token_id=(
+                                chunk.token_id
+                                if os.environ.get("EXO_DEBUG_TOKEN_IDS") == "1"
+                                else None
+                            ),
                             logprob=chunk.logprob,
                             top_logprobs=chunk.top_logprobs or [],
                         )
