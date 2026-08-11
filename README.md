@@ -127,6 +127,9 @@ git clone https://github.com/exo-explore/exo
 # Build dashboard
 cd exo/dashboard && npm install && npm run build && cd ..
 
+# Install Python dependencies, including mlx backend
+uv sync --extra mlx 
+
 # Run exo
 uv run exo
 ```
