@@ -124,7 +124,7 @@ def mlx_distributed_init(
 
                 os.environ["MLX_HOSTFILE"] = coordination_file
                 os.environ["MLX_RANK"] = str(rank)
-                # os.environ["MLX_RING_VERBOSE"] = "1"  # NOTE: we don't use it enough to care (turn on again if need to)
+                os.environ["MLX_RING_VERBOSE"] = "1"
 
                 group = mx.distributed.init(backend="ring", strict=True)
 
@@ -704,6 +704,14 @@ def render_chat_template(
             else "thinking",
             reasoning_effort=_v4_reasoning_effort(task_params),
         )
+        if os.environ.get("EXO_DSV4_PROMPT_VARIANT") == "no_think":
+            # Offline/live A/B diagnostic only. The default V4 encoder contract
+            # is unchanged; this removes only the generation-anchor think
+            # marker so the model sees the bare Assistant role transition.
+            for marker in ("<think>", "</think>"):
+                if prompt.endswith(marker):
+                    prompt = prompt[: -len(marker)]
+                    break
         if v4_prefill:
             prompt += v4_prefill
         return prompt

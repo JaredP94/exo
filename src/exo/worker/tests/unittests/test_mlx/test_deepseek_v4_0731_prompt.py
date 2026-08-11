@@ -263,6 +263,28 @@ def test_task_1_prompt_text_and_token_ids_match_omlx_golden(
     _assert_golden_matches(case_name)
 
 
+def test_v4_no_think_prompt_variant_omits_thinking_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXO_DSV4_PROMPT_VARIANT", "no_think")
+    params = TextGenerationTaskParams(
+        model=MODEL_ID,
+        input=[],
+        enable_thinking=False,
+    )
+
+    prompt = utils_mlx.render_chat_template(
+        cast(TokenizerWrapper, object()),
+        [{"role": "user", "content": "The capital of France is"}],
+        params,
+    )
+
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>The capital of France is"
+        "<｜Assistant｜>"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Task 2: reasoning-effort tiers
 #
