@@ -186,6 +186,39 @@ committed goldens and the offline suites. These four are not yet evidenced:
 * *The dashboard uses the same healthy instance and does not expose DSML markup*
   — not performed.
 
+## 2026-08-10 SDPA float32 validation addendum
+
+The DeepSeek V4 SDPA workaround in `eb3e6fd6` passed the focused local gate:
+67 selected tests passed, including all seven guards in
+`test_dsv4_sdpa_float32_patch.py`; basedpyright reported zero errors, warnings,
+and notes for the patch and its test.
+
+The two-device MLX probe used bit-identical `[-1, 1]` inputs and reported mean
+absolute attention output `0.381306`. Float32 output agreed across the devices
+within the gate (`max_abs=0.000787497`, tolerance `0.025`). The unpatched
+bfloat16 comparison was `max_abs=1.14062`. Because attention output is a convex
+combination of values in this probe, its magnitude cannot exceed one; that
+bfloat16 disagreement is evidence of a wrong computation, not ordinary rounding.
+The probe now prints each rank's bfloat16 min/max and finiteness for an upstream
+MLX report.
+
+The enhanced probe did not complete on its first rerun: rank 0 blocked in
+`mlx::core::distributed::ring::RingGroup::accept_connections()` at
+`TCPSocket::accept`, while rank 1 never connected. Treat this as a topology
+failure and do not work around it in the live-server phase; preserve the exact
+failure and re-establish a symmetric ring first.
+
+Both hosts use MLX-LM 0.31.3 and MLX source commit
+`cc3f3e60be1289506125f2fa19b73b05aa770df8`, but their dev wheels are dated one
+day apart (`0.32.0.dev20260803` and `0.32.0.dev20260804`). That is sufficient to
+proceed with the recorded result, but it is not binary parity, particularly
+because this investigation concerns kernel selection. A future reproduction and
+upstream report should pin one identical MLX wheel, not only a source commit.
+
+The committed message has one terminal blank-line difference from the reference
+file, caused by Git's `cleanup=strip` during the final message-only amend. It is
+cosmetic; do not amend the commit again.
+
 ## 2026-08-11 acceptance addendum
 
 The Phase 1 control-plane fix is now live-validated on the two Macs. After
@@ -433,3 +466,42 @@ routing sets while running the genuinely chained path, then test precision
 stability rather than treating `--float32-hyper` as a complete fix. The live
 nonce result remains unchanged: conditioning is confirmed broken, but this
 local chain has not yet been run end-to-end on the live two-rank instance.
+
+### 2026-08-11 precision policy and full-depth routing audit
+
+The broad float32 experiment kept the hidden state and hyper-connection path in
+float32 on both local ranks (the quantized weights were not dequantized). It
+removed the depth-8/9 knee and reduced the depth-16 delta from `0.90625` to
+`0.00965488`:
+
+| Chained depth | BF16 `max_abs` | Broad float32 `max_abs` |
+|---:|---:|---:|
+| 1 | `0.015625` | `0.00047946` |
+| 2 | `0.015625` | `0.00189805` |
+| 4 | `0.03125` | `0.00196719` |
+| 8 | `0.046875` | `0.00396991` |
+| 9 | `0.226562` | `0.00569558` |
+| 16 | `0.90625` | `0.00965488` |
+
+This is strong evidence for precision-sensitive systemic drift, but not exact
+parity. A narrower experiment that cast only MoE gate inputs to float32 was
+insufficient and was worse than baseline: depths 1, 2, 4, 8, and 16 reported
+`0.015625`, `0.0234375`, `0.160156`, `0.270508`, and `1.01562`. Gate-only
+casting is therefore not a validated production fix.
+
+The acceptance criterion is now exact expert-set agreement, not a per-layer
+floating-point tolerance: for a fixed input, the sorted top-k expert index sets
+must match at every layer. The chained 43-layer BF16 audit passed at layers
+0-7; layer 8 was the first mismatch (one token, token 0), and every layer 9-42
+also mismatched. The final depth-43 state reached `max_abs=81`, with mean
+absolute output `1.92695` against a reference scale of `3.93115`. This gives a
+reproducible local mechanism for the live conditioning failure: accumulated
+distributed numerical drift eventually flips a near-tied MoE routing decision,
+after which the residual streams diverge qualitatively. It remains local
+evidence rather than a live two-node fix, and conditioning is still open.
+
+The earlier `--float32-hyper` result (`max_abs=0.000487` at layer 3) should be
+read as a precision-stability result: the wider float32 path bought enough
+precision to keep a routing decision stable. It did not prove that
+hyper-connections were independently defective, and it is not enabled in
+production.

@@ -443,3 +443,41 @@ This supports systemic numerical drift with a depth-8/9 discontinuity, rather
 than a layer-3-only defect. The routing result is a strong local mechanism
 candidate, not yet proof of the live conditioning failure; chained routing
 capture and precision-stability experiments remain open.
+
+## 2026-08-11 precision policy and full-depth routing audit
+
+The broad float32 experiment kept the hidden state and hyper-connection path in
+float32 on both local ranks while leaving the quantized weights quantized. It
+removed the depth-8/9 knee and reduced depth-16 `max_abs` from `0.90625` to
+`0.00965488`:
+
+| Depth | BF16 | Broad float32 |
+|---:|---:|---:|
+| 1 | `0.015625` | `0.00047946` |
+| 2 | `0.015625` | `0.00189805` |
+| 4 | `0.03125` | `0.00196719` |
+| 8 | `0.046875` | `0.00396991` |
+| 9 | `0.226562` | `0.00569558` |
+| 16 | `0.90625` | `0.00965488` |
+
+This supports a precision-sensitive systemic drift hypothesis but does not
+establish exact parity. Casting only MoE gate inputs to float32 was not
+sufficient: depths 1, 2, 4, 8, and 16 were `0.015625`, `0.0234375`,
+`0.160156`, `0.270508`, and `1.01562`, respectively, so gate-only casting is
+not a validated production fix.
+
+The acceptance criterion is exact sorted top-k expert-set agreement for a fixed
+input at every layer; the old single-layer float tolerance is diagnostic only.
+In the chained 43-layer BF16 audit, layers 0-7 agreed exactly, layer 8 was the
+first mismatch (one token, token 0), and layers 9-42 all mismatched. At depth
+43, `max_abs=81`, mean absolute output was `1.92695`, and the reference scale
+was `3.93115`. The local evidence therefore supports this mechanism: small
+distributed numerical drift accumulates until a near-tied MoE top-k decision
+flips, after which the residual streams diverge qualitatively. This is a
+reproducible local explanation for the live conditioning failure, not a live
+two-node fix.
+
+The earlier `--float32-hyper` layer-3 result (`max_abs=0.000487`) is a
+precision-stability result, not evidence of an independently broken
+hyper-connection. The wider float32 path kept that routing decision stable; no
+production cast is enabled.

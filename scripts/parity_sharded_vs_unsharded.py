@@ -115,6 +115,21 @@ def _force_float32_sinkhorn_only() -> None:
     dsv4.hc_sinkhorn_collapse = float32_sinkhorn_only  # pyright: ignore[reportAttributeAccessIssue]
 
 
+def _force_float32_gate_inputs() -> None:
+    """Cast MoE gate inputs before the logits matmul for an experiment."""
+    from exo.worker.engines.mlx import deepseek_v4_0731_model as dsv4_0731
+
+    gate_type = dsv4_0731.DeepseekV40731MoEGate
+    original = gate_type.__call__
+
+    def float32_gate(
+        self: object, x: mx.array, input_ids: mx.array | None = None
+    ) -> tuple[mx.array, mx.array]:
+        return original(self, x.astype(mx.float32), input_ids)
+
+    gate_type.__call__ = float32_gate  # pyright: ignore[method-assign]
+
+
 class _OneLayerModel(nn.Module):
     """`shard_model` only ever touches `model.layers`, so this is enough.
 
