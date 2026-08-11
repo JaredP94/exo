@@ -41,12 +41,15 @@ def test_float32_backbone_casts_each_decoder_block_boundary() -> None:
         install_deepseek_v4_0731_float32_backbone()
         hidden = mx.zeros((1, 1, 4, 8), dtype=mx.bfloat16)
         output = dsv4.DeepseekV4Block.__call__(
-            object(), hidden, None, mx.zeros((1, 1), dtype=mx.int32)
+            cast(dsv4.DeepseekV4Block, object()),
+            hidden,
+            None,
+            mx.zeros((1, 1), dtype=mx.int32),
         )
         assert seen["input"] == mx.float32
         assert output.dtype == mx.float32
     finally:
-        dsv4.DeepseekV4Block.__call__ = original  # type: ignore[method-assign]
+        dsv4.DeepseekV4Block.__call__ = original
         if had_flag:
             dsv4._exo_dsv4_float32_backbone_patched = True  # type: ignore[attr-defined]
         elif hasattr(dsv4, "_exo_dsv4_float32_backbone_patched"):
@@ -99,7 +102,9 @@ class _HashGate(Protocol):
     weight: mx.array
     tid2eid: mx.array
 
-    def __call__(self, x: mx.array, input_ids: mx.array) -> tuple[mx.array, mx.array]: ...
+    def __call__(
+        self, x: mx.array, input_ids: mx.array
+    ) -> tuple[mx.array, mx.array]: ...
 
 
 class _QuantizedLinearState(Protocol):
@@ -159,11 +164,21 @@ def test_normalize_renames_only_dotted_hyper_connection_keys() -> None:
         "model.layers.1.hc_ffn.fn",
         "model.layers.0.hc_attn_fn",
     }
-    assert normalized["model.layers.0.hc_attn.fn"] is weights["model.layers.0.attn_hc.fn"]
-    assert normalized["model.layers.0.hc_ffn.scale"] is weights["model.layers.0.ffn_hc.scale"]
-    assert normalized["model.layers.1.hc_attn.base"] is weights["model.layers.1.hc_attn.base"]
+    assert (
+        normalized["model.layers.0.hc_attn.fn"] is weights["model.layers.0.attn_hc.fn"]
+    )
+    assert (
+        normalized["model.layers.0.hc_ffn.scale"]
+        is weights["model.layers.0.ffn_hc.scale"]
+    )
+    assert (
+        normalized["model.layers.1.hc_attn.base"]
+        is weights["model.layers.1.hc_attn.base"]
+    )
     assert normalized["model.layers.1.hc_ffn.fn"] is weights["model.layers.1.hc_ffn.fn"]
-    assert normalized["model.layers.0.hc_attn_fn"] is weights["model.layers.0.hc_attn_fn"]
+    assert (
+        normalized["model.layers.0.hc_attn_fn"] is weights["model.layers.0.hc_attn_fn"]
+    )
 
 
 def test_normalize_rejects_dotted_hyper_connection_destination_collisions() -> None:
@@ -239,7 +254,9 @@ def test_shared_experts_inherit_and_apply_swiglu_limit() -> None:
     assert limited[0, 0, 0].item() < unlimited[0, 0, 0].item()
 
 
-def test_compatibility_prepass_leaves_base_sanitizer_transformations_untouched() -> None:
+def test_compatibility_prepass_leaves_base_sanitizer_transformations_untouched() -> (
+    None
+):
     args = _args()
     fused = mx.zeros((12, 32))
     stacked = mx.zeros((1, 32, 32))
@@ -276,8 +293,10 @@ def test_0731_hash_gate_uses_bf16_gemm_before_float32_scoring_and_keeps_paths() 
     gate = cast(_HashGate, cast(object, model.layers[0].ffn.gate))
     gate.weight = mx.array(
         [
-            [((expert * 7919 + feature * 1543) % 997 - 498) / 137
-             for feature in range(routing_args.hidden_size)]
+            [
+                ((expert * 7919 + feature * 1543) % 997 - 498) / 137
+                for feature in range(routing_args.hidden_size)
+            ]
             for expert in range(routing_args.n_routed_experts)
         ],
         dtype=mx.float32,
@@ -299,7 +318,8 @@ def test_0731_hash_gate_uses_bf16_gemm_before_float32_scoring_and_keeps_paths() 
     scores = mx.sqrt(mx.logaddexp(logits, 0))
     selected = mx.take_along_axis(scores, gate.tid2eid[input_ids], axis=-1)
     expected = (
-        selected / (selected.sum(axis=-1, keepdims=True) + 1e-20)
+        selected
+        / (selected.sum(axis=-1, keepdims=True) + 1e-20)
         * routing_args.routed_scaling_factor
     )
     indices, actual = gate(hidden, input_ids)
@@ -318,7 +338,6 @@ def test_0731_hash_gate_uses_bf16_gemm_before_float32_scoring_and_keeps_paths() 
     assert "model.layers.0.ffn.gate.tid2eid" in parameter_paths
 
 
-
 def test_0731_non_hash_gate_uses_omlx_biased_plain_topk_and_float32_weights() -> None:
     args = _args()
     routing_args = cast(_RoutingArgs, cast(object, args))
@@ -329,20 +348,27 @@ def test_0731_non_hash_gate_uses_omlx_biased_plain_topk_and_float32_weights() ->
     gate = DeepseekV40731MoEGate(args, layer_id=0)
     gate.weight = mx.array(
         [
-            [((expert * 73 + feature * 29) % 97 - 48) / 19
-             for feature in range(routing_args.hidden_size)]
+            [
+                ((expert * 73 + feature * 29) % 97 - 48) / 19
+                for feature in range(routing_args.hidden_size)
+            ]
             for expert in range(routing_args.n_routed_experts)
         ],
         dtype=mx.float32,
     ).astype(mx.bfloat16)
     gate.e_score_correction_bias = mx.array(
-        [((expert * 31) % 89 - 44) / 7 for expert in range(routing_args.n_routed_experts)],
+        [
+            ((expert * 31) % 89 - 44) / 7
+            for expert in range(routing_args.n_routed_experts)
+        ],
         dtype=mx.float32,
     )
     hidden = mx.array(
         [
-            [((position * 47 + feature * 17) % 101 - 50) / 13
-             for feature in range(routing_args.hidden_size)]
+            [
+                ((position * 47 + feature * 17) % 101 - 50) / 13
+                for feature in range(routing_args.hidden_size)
+            ]
             for position in range(4)
         ],
         dtype=mx.float32,
@@ -351,11 +377,14 @@ def test_0731_non_hash_gate_uses_omlx_biased_plain_topk_and_float32_weights() ->
     logits = (hidden @ gate.weight.T).astype(mx.float32)
     scores = mx.sqrt(mx.logaddexp(logits, 0))
     selected_indices = mx.argpartition(
-        -(scores + gate.e_score_correction_bias), kth=routing_args.num_experts_per_tok - 1, axis=-1
+        -(scores + gate.e_score_correction_bias),
+        kth=routing_args.num_experts_per_tok - 1,
+        axis=-1,
     )[..., : routing_args.num_experts_per_tok]
     selected_scores = mx.take_along_axis(scores, selected_indices, axis=-1)
     expected_weights = (
-        selected_scores / (selected_scores.sum(axis=-1, keepdims=True) + 1e-20)
+        selected_scores
+        / (selected_scores.sum(axis=-1, keepdims=True) + 1e-20)
         * routing_args.routed_scaling_factor
     )
     actual_indices, actual_weights = gate(hidden)
@@ -371,9 +400,7 @@ def test_0731_non_hash_gate_uses_omlx_biased_plain_topk_and_float32_weights() ->
 def test_split_quantized_wqkv_uses_two_row_slices_for_prefill_and_fused_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source = nn.QuantizedLinear(
-        32, 12, bias=True, group_size=32, bits=8, mode="mxfp8"
-    )
+    source = nn.QuantizedLinear(32, 12, bias=True, group_size=32, bits=8, mode="mxfp8")
     source_state = cast(_QuantizedLinearState, cast(object, source))
     split = SplitOutputQuantizedLinear.from_quantized_linear(source, split=8)
     prefill = mx.arange(64, dtype=mx.float32).reshape(1, 2, 32) / 17
@@ -411,35 +438,42 @@ def test_split_quantized_wqkv_uses_two_row_slices_for_prefill_and_fused_decode(
     split_decode = split(decode)
     assert calls == [(12, 8)]
     assert source_state.bias is not None
-    expected_prefill: mx.array = mx.concatenate(
-        [
-            original(
-                prefill,
-                source_state.weight[:8],
-                scales=source_state.scales[:8],
-                biases=(
-                    source_state.biases[:8] if source_state.biases is not None else None
+    expected_prefill: mx.array = (
+        mx.concatenate(
+            [
+                original(
+                    prefill,
+                    source_state.weight[:8],
+                    scales=source_state.scales[:8],
+                    biases=(
+                        source_state.biases[:8]
+                        if source_state.biases is not None
+                        else None
+                    ),
+                    transpose=True,
+                    group_size=source_state.group_size,
+                    bits=source_state.bits,
+                    mode=source_state.mode,
                 ),
-                transpose=True,
-                group_size=source_state.group_size,
-                bits=source_state.bits,
-                mode=source_state.mode,
-            ),
-            original(
-                prefill,
-                source_state.weight[8:],
-                scales=source_state.scales[8:],
-                biases=(
-                    source_state.biases[8:] if source_state.biases is not None else None
+                original(
+                    prefill,
+                    source_state.weight[8:],
+                    scales=source_state.scales[8:],
+                    biases=(
+                        source_state.biases[8:]
+                        if source_state.biases is not None
+                        else None
+                    ),
+                    transpose=True,
+                    group_size=source_state.group_size,
+                    bits=source_state.bits,
+                    mode=source_state.mode,
                 ),
-                transpose=True,
-                group_size=source_state.group_size,
-                bits=source_state.bits,
-                mode=source_state.mode,
-            ),
-        ],
-        axis=-1,
-    ) + source_state.bias
+            ],
+            axis=-1,
+        )
+        + source_state.bias
+    )
     expected_decode = source_state(decode)
     mx.eval(split_prefill, expected_prefill, split_decode, expected_decode)
     np.testing.assert_array_equal(np.array(split_prefill), np.array(expected_prefill))
@@ -460,9 +494,7 @@ def test_prefill_installer_preserves_direct_quantized_paths_and_audit() -> None:
     )
     quantized: nn.QuantizedLinear = cast(
         _QuantizedLinearState, cast(object, attention.wqkv_a)
-    ).to_quantized(
-        group_size=32, bits=8, mode="mxfp8"
-    )
+    ).to_quantized(group_size=32, bits=8, mode="mxfp8")
     attention.wqkv_a = quantized
     before_paths = {path for path, _ in tree_flatten(model.parameters())}
 
@@ -476,13 +508,19 @@ def test_prefill_installer_preserves_direct_quantized_paths_and_audit() -> None:
     assert wrapped.group_size == 32
     assert wrapped.bits == 8
     assert wrapped.mode == "mxfp8"
-    assert "model.layers.0.attn.wqkv_a.weight" in {path for path, _ in tree_flatten(model.parameters())}
-    assert "model.layers.0.attn.wqkv_a.scales" in {path for path, _ in tree_flatten(model.parameters())}
+    assert "model.layers.0.attn.wqkv_a.weight" in {
+        path for path, _ in tree_flatten(model.parameters())
+    }
+    assert "model.layers.0.attn.wqkv_a.scales" in {
+        path for path, _ in tree_flatten(model.parameters())
+    }
     wrapped_state = cast(_QuantizedLinearState, cast(object, wrapped))
     quantized_state = cast(_QuantizedLinearState, cast(object, quantized))
     assert wrapped_state.get("biases") is quantized_state.get("biases")
     assert ("bias" in wrapped) is ("bias" in quantized)
-    assert not any("wqkv_a.original" in path for path, _ in tree_flatten(model.parameters()))
+    assert not any(
+        "wqkv_a.original" in path for path, _ in tree_flatten(model.parameters())
+    )
     assert before_paths == {path for path, _ in tree_flatten(model.parameters())}
     audit_deepseek_v4_0731_quantization(
         model,
