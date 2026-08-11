@@ -10,7 +10,7 @@ import pytest
 from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
 from exo.shared.types.profiling import NetworkInterfaceInfo, NodeNetworkInfo
-from exo.utils.info_gatherer.net_profile import check_reachability
+from exo.utils.info_gatherer.net_profile import check_reachability, check_reachable
 
 
 @pytest.mark.parametrize(
@@ -115,3 +115,27 @@ async def test_mismatched_node_id_produces_no_reachability_result(
         )
 
     assert out == {}
+
+
+async def test_programming_errors_are_not_silenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    topology, self_node_id, peer_node_id, node_network = _topology_and_network()
+
+    async def programming_failure(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise TypeError("programming failure")
+
+    monkeypatch.setattr(
+        "exo.utils.info_gatherer.net_profile.check_reachability",
+        programming_failure,
+    )
+
+    with pytest.raises(ExceptionGroup) as exc_info:
+        async for _item in check_reachable(
+            topology, self_node_id, node_network, api_port=52415
+        ):
+            pass
+
+    assert isinstance(exc_info.value.exceptions[0], TypeError)
+    del peer_node_id
