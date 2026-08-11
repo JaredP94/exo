@@ -34,6 +34,7 @@ Usage:
     uv run python scripts/validate_dsv4_live_api.py --self-test
     uv run python scripts/validate_dsv4_live_api.py --base-url http://localhost:52415
     uv run python scripts/validate_dsv4_live_api.py --only 5,6,7   # tool cases only
+    uv run python scripts/validate_dsv4_live_api.py --only 5,6,7 --max-tokens 8192
 
 Exit code is non-zero if any check FAILED or any case was INCONCLUSIVE, so this
 is usable as a gate rather than something whose output must be eyeballed.
@@ -627,11 +628,13 @@ def post_stream(url: str, payload: dict[str, Any], timeout: float) -> list[str]:
     return events
 
 
-def chat_body(case: Case, *, stream: bool) -> dict[str, Any]:
+def chat_body(
+    case: Case, *, stream: bool, max_tokens: int | None = None
+) -> dict[str, Any]:
     body: dict[str, Any] = {
         "messages": case.messages,
         "stream": stream,
-        "max_tokens": case.max_tokens,
+        "max_tokens": max_tokens if max_tokens is not None else case.max_tokens,
         "temperature": 0.0,
     }
     body.update(case.opts)
@@ -640,7 +643,9 @@ def chat_body(case: Case, *, stream: bool) -> dict[str, Any]:
     return body
 
 
-def responses_body(case: Case, *, stream: bool) -> dict[str, Any]:
+def responses_body(
+    case: Case, *, stream: bool, max_tokens: int | None = None
+) -> dict[str, Any]:
     converted: list[dict[str, Any]] = []
     for msg in case.messages:
         role = msg["role"]
@@ -657,7 +662,7 @@ def responses_body(case: Case, *, stream: bool) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input": converted,
         "stream": stream,
-        "max_output_tokens": case.max_tokens,
+        "max_output_tokens": max_tokens if max_tokens is not None else case.max_tokens,
         "temperature": 0.0,
     }
     opts = dict(case.opts)
@@ -698,7 +703,11 @@ def responses_text(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 def run_live(
-    base_url: str, model: str, only: set[int] | None, timeout: float
+    base_url: str,
+    model: str,
+    only: set[int] | None,
+    timeout: float,
+    max_tokens: int | None = None,
 ) -> list[CaseResult]:
     results: list[CaseResult] = []
     effort_prompt_tokens: dict[str, int] = {}
@@ -714,7 +723,9 @@ def run_live(
         # Chat Completions, non-streaming
         r = CaseResult(label, "ChatCompletions", False)
         try:
-            body = chat_body(case, stream=False) | {"model": model}
+            body = chat_body(case, stream=False, max_tokens=max_tokens) | {
+                "model": model
+            }
             payload = post_json(f"{base_url}/v1/chat/completions", body, timeout)
             msg = payload["choices"][0]["message"]
             finish = payload["choices"][0].get("finish_reason")
@@ -754,7 +765,9 @@ def run_live(
         # Chat Completions, streaming
         r = CaseResult(label, "ChatCompletions", True)
         try:
-            body = chat_body(case, stream=True) | {"model": model}
+            body = chat_body(case, stream=True, max_tokens=max_tokens) | {
+                "model": model
+            }
             events = post_stream(f"{base_url}/v1/chat/completions", body, timeout)
             r.checks += check_chat_stream_terminals(events)
         except (urllib.error.URLError, OSError, ValueError) as e:
@@ -764,7 +777,9 @@ def run_live(
         # Responses, non-streaming
         r = CaseResult(label, "Responses", False)
         try:
-            body = responses_body(case, stream=False) | {"model": model}
+            body = responses_body(case, stream=False, max_tokens=max_tokens) | {
+                "model": model
+            }
             payload = post_json(f"{base_url}/v1/responses", body, timeout)
             content, reasoning = responses_text(payload)
             resp_content[case.number] = content
@@ -799,7 +814,9 @@ def run_live(
         # Responses, streaming
         r = CaseResult(label, "Responses", True)
         try:
-            body = responses_body(case, stream=True) | {"model": model}
+            body = responses_body(case, stream=True, max_tokens=max_tokens) | {
+                "model": model
+            }
             events = post_stream(f"{base_url}/v1/responses", body, timeout)
             r.checks += check_responses_stream_terminals(events)
         except (urllib.error.URLError, OSError, ValueError) as e:
@@ -894,7 +911,11 @@ def _non_latin_ratio(text: str) -> float:
 
 
 def run_determinism(
-    base_url: str, model: str, repeats: int, timeout: float
+    base_url: str,
+    model: str,
+    repeats: int,
+    timeout: float,
+    max_tokens: int | None = None,
 ) -> CaseResult:
     """Send one identical request N times and compare the completions.
 
@@ -917,7 +938,7 @@ def run_determinism(
         "model": model,
         "messages": [{"role": "user", "content": "Say hello in one short sentence."}],
         "enable_thinking": False,
-        "max_tokens": 48,
+        "max_tokens": max_tokens if max_tokens is not None else 48,
         "temperature": 0.0,
     }
     try:
@@ -1354,6 +1375,12 @@ def main() -> int:
         "--only", default="", help="comma-separated case numbers, e.g. 5,6,7"
     )
     ap.add_argument("--timeout", type=float, default=600.0)
+    ap.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="override every case's max_tokens/max_output_tokens budget",
+    )
     ap.add_argument("--skip-prefix-cache", action="store_true")
     ap.add_argument(
         "--self-test",
@@ -1378,13 +1405,19 @@ def main() -> int:
 
     if args.determinism:
         result = run_determinism(
-            args.base_url, args.model, args.determinism, args.timeout
+            args.base_url,
+            args.model,
+            args.determinism,
+            args.timeout,
+            args.max_tokens,
         )
         print_report([result])
         return 0 if result.verdict == "PASS" else 1
 
     only = {int(x) for x in args.only.split(",") if x.strip()} or None
-    results = run_live(args.base_url, args.model, only, args.timeout)
+    results = run_live(
+        args.base_url, args.model, only, args.timeout, args.max_tokens
+    )
     if not args.skip_prefix_cache and not only:
         results.append(run_prefix_cache(args.base_url, args.model, args.timeout))
     print_report(results)

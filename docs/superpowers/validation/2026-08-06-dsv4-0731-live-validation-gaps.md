@@ -823,3 +823,60 @@ while this checkpoint is unreliable on exact-echo/random-string instructions
 and at least some creative-writing requests. The validation record must not
 call that an inference-stack failure. Tool calls remain unvalidated live, and
 the 32K ceiling/64K watchdog hazard remain unchanged.
+
+## 2026-08-11 8192-token reasoning-budget acceptance
+
+The haiku request was repeated on a fresh two-rank instance with
+`max_tokens=8192`, greedy decoding, `enable_thinking=false`,
+`use_prefix_cache=false`, and `cached_tokens=0`. It completed with
+`completion_tokens=240` and `finish_reason=stop`. The returned content included
+an inline planning trace, closed `</think>`, and then the requested poem:
+
+~~~
+Okay, the user asked for a haiku about rain. ...
+Let me count the syllables as I think. ...
+</think>A drop on the leaf,
+Then the soft patter of rain—
+Scent of the wet earth.
+~~~
+
+This confirms the budget hypothesis. `enable_thinking=false` does not prevent
+the checkpoint from planning on non-trivial prompts; it can emit the planning
+trace inline in `content` rather than in `reasoning_content`. A sufficiently
+large budget lets it close the trace and answer. The earlier exact-echo,
+haiku, 650-token, 2,048-token, and 256-token failures are therefore
+budget-truncation evidence, not task-content or distributed-inference
+failures.
+
+The acceptance harness was extended with a client-only `--max-tokens` override
+so its case-specific 512/768-token defaults could be raised without changing
+the default battery. At `--max-tokens 8192`:
+
+| Run | Result |
+|---|---|
+| `--self-test` | PASS; every synthetic good/bad check behaved as expected |
+| `--determinism 3` | PASS; all three greedy completions identical and stopped normally |
+| `--only 5,6,7` | 9 PASS, 2 FAIL, 1 INCONCLUSIVE |
+
+The tool gate is not closed. Cases 5 and 6 still fail for non-streaming Chat
+Completions: both return `finish_reason=stop` without `tool_calls`. A direct
+case-5 inspection returned content ending in the generic marker `<|tool_|>`
+instead of a parsed DeepSeek V4 DSML tool call; it stopped after 40 completion
+tokens, with 21 reported reasoning tokens, so this is no longer explained by
+an insufficient 8192-token budget. Streaming terminal checks pass, but those
+checks do not assert that a tool call was emitted. Case 7's Responses
+cross-endpoint check remains intentionally INCONCLUSIVE because that schema
+cannot express the supplied tool-message conversation.
+
+The same instance measured streamed throughput with a unique 512-token-class
+prompt (`prompt_tokens=546`), `max_tokens=8192`, and `cached_tokens=0`:
+
+| TTFT | Prefill | Decode | Completion |
+|---:|---:|---:|---:|
+| `2.9197 s` | `187.00 tok/s` | `21.37 tok/s` | `8192 tokens` |
+
+The decode measurement captures the long reasoning workload rather than a
+short answer. The distributed path, sharding, collectives, JACCL transport,
+tokenizer, chat arrangement, and decode are validated for ordinary terminating
+answers; live tool-call semantics remain open due to the separate marker/parser
+problem above.
