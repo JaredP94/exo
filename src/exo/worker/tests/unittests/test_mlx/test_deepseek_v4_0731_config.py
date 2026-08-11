@@ -45,7 +45,13 @@ def _write_checkpoint(
 ) -> None:
     (model_path / "config.json").write_text(json.dumps(config))
     (model_path / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {key: "model-00001-of-00001.safetensors" for key in weight_keys}})
+        json.dumps(
+            {
+                "weight_map": {
+                    key: "model-00001-of-00001.safetensors" for key in weight_keys
+                }
+            }
+        )
     )
 
 
@@ -162,7 +168,9 @@ def test_partial_or_malformed_dspark_evidence_is_rejected(
         ("model.layers.3.attn.unrelated_wkv", "model.layers.3.attn.unrelated_wkv"),
     ],
 )
-def test_realized_quantization_path_rewrites_only_expected_paths(source: str, realized: str) -> None:
+def test_realized_quantization_path_rewrites_only_expected_paths(
+    source: str, realized: str
+) -> None:
     assert realized_quantization_path(source) == realized
 
 
@@ -230,7 +238,9 @@ def test_normalization_omits_mtp_quantization_and_updates_mirrored_config() -> N
     assert normalized["quantization_config"] == normalized["quantization"]
 
 
-def test_normalization_preserves_global_quantization_scalars_without_parsing_them() -> None:
+def test_normalization_preserves_global_quantization_scalars_without_parsing_them() -> (
+    None
+):
     config = _config(
         quantization={
             "bits": 4,
@@ -255,9 +265,7 @@ def test_normalization_preserves_global_quantization_scalars_without_parsing_the
         "model.layers.0.attn.wqkv_a": _spec(),
     }
     assert normalized["quantization_config"] == normalized["quantization"]
-    assert realized == {
-        "model.layers.0.attn.wqkv_a": QuantizationSpec(8, 32, "mxfp8")
-    }
+    assert realized == {"model.layers.0.attn.wqkv_a": QuantizationSpec(8, 32, "mxfp8")}
 
 
 def test_normalized_quantization_specs_reconstructs_explicit_triples() -> None:
@@ -289,8 +297,12 @@ def test_normalization_collapses_641_sources_to_536_realized_paths() -> None:
         quantization[f"model.layers.{layer_id}.attn.wq_a"] = _spec()
         quantization[f"model.layers.{layer_id}.attn.wkv"] = _spec()
     for declaration_id in range(431):
-        quantization[f"model.layers.{declaration_id}.ffn.switch_mlp.gate_proj"] = _spec(4, 64, "mxfp4")
-    config = _config(num_hidden_layers=536, compress_ratios=[0] * 536, quantization=quantization)
+        quantization[f"model.layers.{declaration_id}.ffn.switch_mlp.gate_proj"] = _spec(
+            4, 64, "mxfp4"
+        )
+    config = _config(
+        num_hidden_layers=536, compress_ratios=[0] * 536, quantization=quantization
+    )
 
     normalized, realized = normalize_deepseek_v4_0731_config(config)
 
@@ -301,12 +313,16 @@ def test_normalization_collapses_641_sources_to_536_realized_paths() -> None:
 
 
 @pytest.mark.parametrize("world_size", [1, 2, 4, 8])
-def test_geometry_accepts_world_sizes_that_divide_heads_per_group(world_size: int) -> None:
+def test_geometry_accepts_world_sizes_that_divide_heads_per_group(
+    world_size: int,
+) -> None:
     validate_deepseek_v4_0731_shard_geometry(_config(), {}, world_size)
 
 
 @pytest.mark.parametrize("world_size", [3, 16])
-def test_geometry_rejects_world_sizes_that_do_not_divide_heads_per_group(world_size: int) -> None:
+def test_geometry_rejects_world_sizes_that_do_not_divide_heads_per_group(
+    world_size: int,
+) -> None:
     with pytest.raises(DeepseekV40731CompatibilityError, match="heads_per_group=8"):
         validate_deepseek_v4_0731_shard_geometry(_config(), {}, world_size)
 
