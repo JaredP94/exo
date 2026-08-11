@@ -216,8 +216,10 @@ def _generate(model: Any, mx: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     greedy_logits.append(np.asarray(logits[:, -1:, :].astype(mx.float32)))
 
-    return initial_logits, np.asarray(tokens, dtype=np.int32), np.concatenate(
-        greedy_logits, axis=1
+    return (
+        initial_logits,
+        np.asarray(tokens, dtype=np.int32),
+        np.concatenate(greedy_logits, axis=1),
     )
 
 
@@ -228,7 +230,10 @@ def _shard_geometry(
         [layer.attn.n_heads for layer in model.model.layers],
         [layer.attn.wq_b.weight.shape[0] for layer in model.model.layers],
         [layer.attn.wq_b.weight.shape[-1] for layer in model.model.layers],
-        [layer.ffn._v4_inner.switch_mlp.gate_proj.weight.shape[-2] for layer in model.model.layers],
+        [
+            layer.ffn._v4_inner.switch_mlp.gate_proj.weight.shape[-2]
+            for layer in model.model.layers
+        ],
         [type(layer.attn.wq_b).__name__ for layer in model.model.layers],
     )
 
@@ -283,7 +288,9 @@ def _tp_worker(name: str, rank: int, hostfile: str, out_path: str, queue: Any) -
         queue.put((rank, False, f"{error}\n{traceback.format_exc()}"))
 
 
-def _diagnostics(name: str, reference: np.ndarray, sharded: np.ndarray, path: str) -> str:
+def _diagnostics(
+    name: str, reference: np.ndarray, sharded: np.ndarray, path: str
+) -> str:
     diff = np.abs(reference - sharded)
     return (
         f"[fixture={name} rank=0 layer_path={path} TP=2] "
@@ -327,7 +334,9 @@ def _run_compare(name: str, port_base: int) -> None:
         context = mp.get_context("spawn")
         queue = context.Queue()
 
-        reference_process = context.Process(target=_ref_worker, args=(name, ref_path, queue))
+        reference_process = context.Process(
+            target=_ref_worker, args=(name, ref_path, queue)
+        )
         reference_process.start()
         reference_process.join(300)
         result = queue.get(timeout=10)
@@ -335,12 +344,16 @@ def _run_compare(name: str, port_base: int) -> None:
             pytest.fail(f"[fixture={name} rank=reference] FAIL: {result}")
 
         hosts = [f"127.0.0.1:{port_base + rank}" for rank in range(2)]
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as file:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as file:
             json.dump(hosts, file)
             hostfile = file.name
         try:
             processes = [
-                context.Process(target=_tp_worker, args=(name, rank, hostfile, tp_path, queue))
+                context.Process(
+                    target=_tp_worker, args=(name, rank, hostfile, tp_path, queue)
+                )
                 for rank in range(2)
             ]
             for process in processes:
@@ -372,9 +385,14 @@ def _run_compare(name: str, port_base: int) -> None:
                 np.full(4, "QuantizedLinear" if "q4" in name else "Linear"),
             )
 
-        diagnostics = _diagnostics(name, reference["logits"], sharded["logits"], "model.logits")
+        diagnostics = _diagnostics(
+            name, reference["logits"], sharded["logits"], "model.logits"
+        )
         np.testing.assert_allclose(
-            reference["logits"], sharded["logits"], **TOLERANCES[name], err_msg=diagnostics
+            reference["logits"],
+            sharded["logits"],
+            **TOLERANCES[name],
+            err_msg=diagnostics,
         )
         np.testing.assert_array_equal(
             np.argmax(reference["logits"], axis=-1),
@@ -385,7 +403,10 @@ def _run_compare(name: str, port_base: int) -> None:
             sharded["tokens"],
             reference["tokens"],
             err_msg=_diagnostics(
-                name, reference["greedy_logits"], sharded["greedy_logits"], "model.greedy_logits"
+                name,
+                reference["greedy_logits"],
+                sharded["greedy_logits"],
+                "model.greedy_logits",
             ),
         )
 
