@@ -547,9 +547,17 @@ def mlx_generate(
     seed = task.seed or 42
     mx.random.seed(seed)
 
-    # Encode prompt once at the top and fix unmatched think tags
-    all_prompt_tokens = encode_prompt(tokenizer, prompt)
-    all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
+    # Encode prompt once at the top. The raw-ID path is an opt-in diagnostic and
+    # must remain byte-for-byte faithful, so do not rewrite its think markers.
+    all_prompt_tokens = encode_prompt(
+        tokenizer,
+        prompt,
+        raw_input_ids=task.raw_input_ids,
+    )
+    if task.raw_input_ids is None:
+        all_prompt_tokens = fix_unmatched_think_end_tokens(
+            all_prompt_tokens, tokenizer
+        )
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None

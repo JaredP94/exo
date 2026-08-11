@@ -505,13 +505,23 @@ def trim_cache(
             c.trim(num_tokens)
 
 
-def encode_prompt(tokenizer: TokenizerWrapper, prompt: str) -> mx.array:
+def encode_prompt(
+    tokenizer: TokenizerWrapper,
+    prompt: str,
+    *,
+    raw_input_ids: list[int] | None = None,
+) -> mx.array:
     """Encode a prompt string to token array.
 
     For chat-templated prompts (which have their own structure markers like
     <|im_user|>, <|im_middle|>, etc.), we should NOT add BOS/EOS tokens as
     that would corrupt the prompt structure.
     """
+    if raw_input_ids is not None:
+        if not raw_input_ids:
+            raise ValueError("raw_input_ids must contain at least one token")
+        return mx.array(raw_input_ids)
+
     # Chat templates define their own structure - don't add BOS/EOS
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=False)
     return mx.array(prompt_tokens)

@@ -153,6 +153,7 @@ async def chat_request_to_text_generation(
         input=input_messages
         if input_messages
         else [InputMessage(role="user", content=InputMessageContent(""))],
+        raw_input_ids=request.raw_input_ids,
         instructions=InputMessageContent(instructions) if instructions else None,
         max_output_tokens=request.max_tokens,
         temperature=request.temperature,

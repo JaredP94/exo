@@ -640,6 +640,19 @@ def render_chat_template(
     because its encoder renders a trailing assistant turn in the content channel
     rather than needing the turn removed and its text re-appended raw.
     """
+    if task_params.raw_input_ids is not None:
+        if os.environ.get("EXO_ENABLE_RAW_INPUT_IDS_DEBUG") != "1":
+            raise ValueError(
+                "raw_input_ids is debug-only; set EXO_ENABLE_RAW_INPUT_IDS_DEBUG=1 "
+                "on every rank to enable it"
+            )
+        if not task_params.raw_input_ids:
+            raise ValueError("raw_input_ids must contain at least one token")
+        logger.warning(
+            "Using raw_input_ids debug path; chat messages and template encoding "
+            "are bypassed"
+        )
+        return ""
     if _needs_v4_encoding(task_params):
         from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
             relocate_mid_system_messages,

@@ -126,10 +126,15 @@ class ExoBatchGenerator:
         distributed_prompt_progress_callback: Callable[[], None] | None = None,
         on_generation_token: Callable[[], None] | None = None,
     ) -> int:
-        all_prompt_tokens = encode_prompt(self.tokenizer, prompt)
-        all_prompt_tokens = fix_unmatched_think_end_tokens(
-            all_prompt_tokens, self.tokenizer
+        all_prompt_tokens = encode_prompt(
+            self.tokenizer,
+            prompt,
+            raw_input_ids=task_params.raw_input_ids,
         )
+        if task_params.raw_input_ids is None:
+            all_prompt_tokens = fix_unmatched_think_end_tokens(
+                all_prompt_tokens, self.tokenizer
+            )
 
         vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []

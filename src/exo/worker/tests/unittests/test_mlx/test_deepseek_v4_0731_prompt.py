@@ -13,6 +13,7 @@ from tokenizers import Tokenizer
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import ReasoningEffort, TextGenerationTaskParams
 from exo.worker.engines.mlx import utils_mlx
+from exo.worker.engines.mlx.cache import encode_prompt
 from exo.worker.engines.mlx.vendor import deepseek_v4_encoding
 
 MODEL_ID = ModelId("Jundot/DeepSeek-V4-Flash-0731-oQ4e-mtp")
@@ -100,6 +101,32 @@ def _render(case: GoldenCase) -> str:
 
 def test_v4_declares_arbitrary_mid_system_messages_unsupported() -> None:
     assert deepseek_v4_encoding.supports_mid_system_messages is False
+
+
+def test_raw_input_ids_bypass_chat_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXO_ENABLE_RAW_INPUT_IDS_DEBUG", "1")
+    params = TextGenerationTaskParams(
+        model=MODEL_ID,
+        input=[],
+        raw_input_ids=[0, 128803, 128821],
+    )
+
+    prompt = utils_mlx.apply_chat_template(
+        cast(TokenizerWrapper, object()),
+        params,
+    )
+
+    assert prompt == ""
+
+
+def test_encode_prompt_accepts_raw_input_ids_without_tokenizer() -> None:
+    tokens = encode_prompt(
+        cast(TokenizerWrapper, object()),
+        "ignored by raw input IDs",
+        raw_input_ids=[0, 128803, 128821],
+    )
+
+    assert tokens.tolist() == [0, 128803, 128821]
 
 
 def test_reminder_relocation_keeps_leading_system_and_does_not_mutate() -> None:

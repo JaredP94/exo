@@ -658,3 +658,73 @@ previous 64K watchdog-panic report retained as an operational hazard.
 
 Live tool calls remain unvalidated: the templating blocker means there is still
 zero live evidence for tool-call behavior.
+
+## 2026-08-11 prompt-arrangement A/B and raw-token localization
+
+The pinned environment identifies its reference as
+'rltakashige/mlx-lm', branch 'leo/deepseek-v4', commit
+'6a3df6cd6b00a347ee40f12d97a182aaf86ea599' (uv.lock). The installed reference
+file is 'mlx_lm/chat_templates/deepseek_v4.py'; it was compared directly with
+EXO's 'src/exo/worker/engines/mlx/vendor/deepseek_v4_encoding.py'. For ordinary
+chat, thinking mode, and leading-system-plus-user messages, the rendered
+strings match byte-for-byte, including whitespace and newline placement. The
+reference itself emits <｜Assistant｜></think> for chat mode and opens
+<think> for thinking mode, so the pre-closed marker is not by itself evidence
+of an EXO-only mistake. EXO's "max" reasoning text is the remaining known
+offline difference.
+
+The checkpoint has no own chat template, so this comparison is against the
+pinned V4 reference implementation, not a checkpoint-declared template. The
+official DeepSeek V3 documentation likewise uses apply_chat_template with a
+generation prompt, while the DeepSeek R1 documentation recommends the
+checkpoint tokenizer's chat-template path and discusses the reasoning
+<think> prefix. Those references establish the general convention, but do not
+prove that this V4 checkpoint's arrangement is correct.
+
+The live A/B used the exact same user message, greedy decoding, max_tokens=64,
+and use_prefix_cache=false on a two-rank Tensor/MlxJaccl instance. Every
+response reported cached_tokens=0; none followed the exact instruction:
+
+~~~
+Return exactly this string and nothing else: WIRE-PROMPT-AUDIT-20260811
+~~~
+
+| Arrangement | Completion prefix / first ten generated pieces | Result |
+|---|---|---|
+| Current EXO format, enable_thinking=false | I need to respond to the user's query...; I, need, to, respond, to, the, user, 's, query, . | Failed; meta-analysis loop, finish_reason=length, 64 tokens |
+| Current EXO format, enable_thinking=true | reasoning begins The user is asking me...; The, user, is, asking, me, to, complete, a, sentence, that; visible content was ' -' | Failed; 63 reasoning tokens, 1 visible token, finish_reason=length |
+| System turn plus user, thinking off | . The user's query is in Chinese...; ., The, user, 's, query, is, in, Chinese, and, asks | Failed; unrelated Chinese instruction, finish_reason=length, 64 tokens |
+| Opt-in EXO_DSV4_PROMPT_VARIANT=no_think | 你提供的这段文字看起来像是...; 你, 提供的, 这段, 文字, 看起来, 像是, 某种, 代码, 或, 加密 | Failed; unrelated Chinese explanation, finish_reason=length, 64 tokens |
+
+The fourth arrangement was an opt-in diagnostic only; the default encoder is
+unchanged. The A/B therefore does not identify a working chat arrangement, and
+it does not support a claim that the model is ignoring the prompt wholesale.
+
+### Raw-token control
+
+Because all four arrangements failed, the branch adds a test-covered,
+debug-only raw_input_ids field to Chat Completions and the internal task
+parameters. With EXO_ENABLE_RAW_INPUT_IDS_DEBUG=1 set on every rank, it
+bypasses chat rendering and both sequential and batch string-tokenization
+paths; the supplied IDs are passed directly to prefill. It rejects an empty
+ID list and is disabled by default.
+
+The live two-rank raw continuation used the checkpoint tokenizer's IDs for
+The capital of France is without BOS or role scaffolding:
+
+~~~
+raw_input_ids=[671, 6102, 294, 8760, 344]
+~~~
+
+The request reported prompt_tokens=5, cached_tokens=0, and returned:
+
+~~~
+Paris. The capital of France is Paris
+~~~
+
+This is the decisive localization in the current record: the checkpoint,
+tokenizer IDs, distributed model, collectives, and decode path can produce the
+correct factual continuation when the chat encoder is bypassed. The remaining
+defect is prompt construction or the model's response to the constructed V4
+arrangement; the numerical-routing work remains characterization and is not
+the demonstrated cause of the live instruction-following failure.

@@ -222,6 +222,9 @@ class StreamOptions(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: ModelId
+    # Debug-only escape hatch for prompt-construction diagnosis. When enabled
+    # by the runner environment, this bypasses chat-template rendering.
+    raw_input_ids: list[int] | None = None
     frequency_penalty: float | None = None
     messages: list[ChatCompletionMessage]
     logit_bias: dict[str, int] | None = None

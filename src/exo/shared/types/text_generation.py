@@ -108,6 +108,9 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
 
     model: ModelId
     input: list[InputMessage]
+    # Debug-only prompt-construction escape hatch. The worker consumes these
+    # IDs directly instead of encoding the chat messages.
+    raw_input_ids: list[int] | None = None
     instructions: InputMessageContent | None = None
     max_output_tokens: int | None = None
     temperature: float | None = None
