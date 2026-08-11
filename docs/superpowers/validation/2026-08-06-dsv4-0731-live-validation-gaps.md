@@ -395,3 +395,41 @@ back to bfloat16. It did not change the layer-3 result: chained FFN
 result therefore requires a wider float32 path than Sinkhorn normalization
 alone; no production cast has been enabled and no live nonce probe was run
 with an unvalidated fix.
+
+### 2026-08-11 systemic drift and routing follow-up
+
+The one-layer results must not be read as an end-to-end pass. The measured
+full-block deltas at layers 0, 2, 4, and 5 (`0.015625`, `0.015625`,
+`0.0234375`, and `0.03125`) are all nonzero against reference output scales
+around `0.38` in the earlier layer runs. The tolerance of `0.05` is therefore
+only a single-layer diagnostic bound; it is not evidence that 43 chained layers
+preserve the prompt.
+
+The exact expert-selection probe compares sorted top-k index sets, with no
+floating-point tolerance. On the same synthetic input, layers 0, 1, 2, 4, and
+5 agreed exactly. Layer 3 was the first mismatch: at token 3, the unsharded
+set was `[12, 21, 24, 30, 69, 111]` and the sharded set was
+`[12, 21, 24, 30, 69, 109]`. The other five experts were identical. This is
+discrete evidence that the continuous drift can cross the MoE top-k boundary;
+it does not by itself prove that the live prompt-irrelevant output is caused by
+this path.
+
+The new chained two-process harness feeds each output into the next layer and
+reports the accumulated full-state delta:
+
+| Chained depth | `max_abs` | Mean absolute output scale |
+|---:|---:|---:|
+| 1 | `0.015625` | `0.730007` |
+| 2 | `0.015625` | `0.695943` |
+| 4 | `0.03125` | `0.671867` |
+| 8 | `0.046875` | `0.642554` |
+| 9 | `0.226562` | `0.641240` |
+| 16 | `0.90625` | `0.561247` |
+
+This is systemic accumulated drift with a sharp increase after depth 8, not a
+layer-3-only exception. The first observed routing discontinuity is at layer 3
+under the independent same-input probe; the next experiment should capture
+routing sets while running the genuinely chained path, then test precision
+stability rather than treating `--float32-hyper` as a complete fix. The live
+nonce result remains unchanged: conditioning is confirmed broken, but this
+local chain has not yet been run end-to-end on the live two-rank instance.

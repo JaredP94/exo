@@ -416,3 +416,30 @@ not improve layer 3: chained FFN `0.121094`, `hc_ffn_post` `0.125`, full block
 `0.125`. The earlier `0.000487` full-path result therefore cannot be attributed
 to Sinkhorn normalization alone, and no production change or live acceptance
 probe has been run for it.
+
+## 2026-08-11 systemic drift and routing follow-up
+
+The one-layer tolerance is not an end-to-end acceptance criterion. Full-block
+deltas at layers 0, 2, 4, and 5 were all nonzero (`0.015625`, `0.015625`,
+`0.0234375`, and `0.03125`), so per-layer PASS only bounds local error.
+
+The exact expert-selection mode compares sorted top-k index sets without a
+numeric tolerance. With the same synthetic input, layers 0, 1, 2, 4, and 5
+agreed. Layer 3 was the first mismatch at token 3: unsharded
+`[12, 21, 24, 30, 69, 111]`; sharded `[12, 21, 24, 30, 69, 109]`.
+
+The chained two-process run produced this accumulated full-state drift:
+
+| Chained depth | `max_abs` | Mean absolute output scale |
+|---:|---:|---:|
+| 1 | `0.015625` | `0.730007` |
+| 2 | `0.015625` | `0.695943` |
+| 4 | `0.03125` | `0.671867` |
+| 8 | `0.046875` | `0.642554` |
+| 9 | `0.226562` | `0.641240` |
+| 16 | `0.90625` | `0.561247` |
+
+This supports systemic numerical drift with a depth-8/9 discontinuity, rather
+than a layer-3-only defect. The routing result is a strong local mechanism
+candidate, not yet proof of the live conditioning failure; chained routing
+capture and precision-stability experiments remain open.

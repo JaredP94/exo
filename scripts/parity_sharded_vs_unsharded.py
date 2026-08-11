@@ -32,6 +32,7 @@ cluster and is unaffected by the topology-discovery failure.
     mlx.launch -n 2 scripts/parity_sharded_vs_unsharded.py --layer 3   # Compressor
     mlx.launch -n 2 scripts/parity_sharded_vs_unsharded.py --layer 3 --float32-hyper
     mlx.launch -n 2 scripts/parity_sharded_vs_unsharded.py --layer 3 --float32-sinkhorn
+    mlx.launch -n 2 scripts/parity_sharded_vs_unsharded.py --layer 3 --expert-selection
 
 `compress_ratios` is [0, 0, 4, 128, 4, 128, ...], so layer 0 has no compressor,
 layer 2 runs the Indexer, and layer 3 runs the Compressor without it. Cover all
@@ -238,6 +239,40 @@ def _report_with_input(
     return ok
 
 
+def _report_expert_selection(
+    reference_indices: mx.array, candidate_indices: mx.array
+) -> bool:
+    """Compare routed expert sets exactly, ignoring only top-k ordering."""
+    if reference_indices.shape != candidate_indices.shape:
+        print(
+            "  expert_selection SHAPE MISMATCH "
+            f"{tuple(reference_indices.shape)} vs {tuple(candidate_indices.shape)}"
+        )
+        return False
+
+    reference_sets = mx.sort(reference_indices.astype(mx.int32), axis=-1)
+    candidate_sets = mx.sort(candidate_indices.astype(mx.int32), axis=-1)
+    mx.eval(reference_sets, candidate_sets)
+    same = bool(mx.all(reference_sets == candidate_sets).item())
+    print(
+        f"  expert_selection {'PASS' if same else 'FAIL'}  "
+        f"shape={tuple(reference_indices.shape)}  exact_set_agreement={same}"
+    )
+    if not same:
+        reference_rows = reference_sets.tolist()
+        candidate_rows = candidate_sets.tolist()
+        for row_index, (reference_row, candidate_row) in enumerate(
+            zip(reference_rows, candidate_rows, strict=True)
+        ):
+            if reference_row != candidate_row:
+                print(
+                    f"      first mismatch at flattened token {row_index}: "
+                    f"unsharded={reference_row} sharded={candidate_row}"
+                )
+                break
+    return same
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
@@ -255,6 +290,11 @@ def main() -> int:
         "--float32-sinkhorn",
         action="store_true",
         help="use float32 Sinkhorn normalization but preserve the input dtype",
+    )
+    ap.add_argument(
+        "--expert-selection",
+        action="store_true",
+        help="compare exact top-k expert index sets and stop before FFN execution",
     )
     args = ap.parse_args()
 
@@ -357,6 +397,22 @@ def main() -> int:
     ref_y_ffn = ref_layer.ffn_norm(ref_hc_ffn)  # pyright: ignore[reportAny]
     shard_y_ffn = shard_layer.ffn_norm(shard_hc_ffn)  # pyright: ignore[reportAny]
     mx.eval(ref_hc_ffn, shard_hc_ffn, ref_y_ffn, shard_y_ffn)
+
+    if args.expert_selection:
+        ref_expert_indices, _ = ref_layer.ffn.gate(  # pyright: ignore[reportAny]
+            ref_y_ffn, input_ids
+        )
+        shard_expert_indices, _ = shard_layer.ffn.gate(  # pyright: ignore[reportAny]
+            shard_y_ffn, input_ids
+        )
+        mx.eval(ref_expert_indices, shard_expert_indices)
+        say("\nexpert selection (exact top-k index sets):")
+        if rank == 0:
+            return 0 if _report_expert_selection(
+                ref_expert_indices, shard_expert_indices
+            ) else 1
+        return 0
+
     ref_ffn = ref_layer.ffn(ref_y_ffn, input_ids)  # pyright: ignore[reportAny]
     shard_ffn = shard_layer.ffn(shard_y_ffn, input_ids)  # pyright: ignore[reportAny]
     ref_ffn_isolated = ref_layer.ffn(ref_y_ffn, input_ids)  # pyright: ignore[reportAny]
