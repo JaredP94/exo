@@ -423,10 +423,12 @@ The one-layer tolerance is not an end-to-end acceptance criterion. Full-block
 deltas at layers 0, 2, 4, and 5 were all nonzero (`0.015625`, `0.015625`,
 `0.0234375`, and `0.03125`), so per-layer PASS only bounds local error.
 
-The exact expert-selection mode compares sorted top-k index sets without a
-numeric tolerance. With the same synthetic input, layers 0, 1, 2, 4, and 5
-agreed. Layer 3 was the first mismatch at token 3: unsharded
-`[12, 21, 24, 30, 69, 111]`; sharded `[12, 21, 24, 30, 69, 109]`.
+The independent same-input expert-selection mode compares sorted top-k index
+sets without a numeric tolerance. It found a layer-3 mismatch at token 3:
+unsharded `[12, 21, 24, 30, 69, 111]`; sharded
+`[12, 21, 24, 30, 69, 109]`. This is an isolated-layer diagnostic with a
+fresh synthetic input, not the end-to-end depth finding, and is superseded by
+the chained audit below.
 
 The chained two-process run produced this accumulated full-state drift:
 
@@ -440,9 +442,10 @@ The chained two-process run produced this accumulated full-state drift:
 | 16 | `0.90625` | `0.561247` |
 
 This supports systemic numerical drift with a depth-8/9 discontinuity, rather
-than a layer-3-only defect. The routing result is a strong local mechanism
-candidate, not yet proof of the live conditioning failure; chained routing
-capture and precision-stability experiments remain open.
+than a layer-3-only defect. The isolated layer-3 mismatch is superseded as the
+end-to-end finding: the chained BF16 run agrees through layers 0-7 and first
+mismatches at layer 8, aligned with the depth-8/9 knee. That chained result is
+the accepted baseline localization, not the isolated-layer result.
 
 ## 2026-08-11 precision policy and full-depth routing audit
 
@@ -481,3 +484,23 @@ The earlier `--float32-hyper` layer-3 result (`max_abs=0.000487`) is a
 precision-stability result, not evidence of an independently broken
 hyper-connection. The wider float32 path kept that routing decision stable; no
 production cast is enabled.
+
+The broad-float32 43-layer routing audit did not satisfy the zero-mismatch
+acceptance criterion. Layers 0-24 agreed exactly; layer 25 was the first
+mismatch and layers 26-42 also mismatched. At depth 43 the broad-float32
+`max_abs` was `10.1784`, mean absolute delta `0.351607`, and reference scale
+`3.20986`. It removes the early knee and substantially reduces drift through
+depth 16, but it is not a known-good end-to-end configuration. No live nonce
+probe was run with it.
+Because the broad configuration failed the routing gate, the corresponding live
+16K/32K memory window was not run; retain the existing hard 32K ceiling and
+single 64K watchdog-panic record.
+
+The gate-only result is counter-intuitive but informative: casting MoE gate
+inputs to float32 worsened depth-16 drift to `1.01562` versus BF16 `0.90625`.
+BF16 can mask near-tied logits by rounding both paths to the same value; the
+float32 gate exposes an upstream disagreement and can make routing diverge
+sooner. Precision therefore needs to be applied upstream, where the hidden
+state disagreement is introduced, not only at the discrete decision point.
+Sinkhorn-only failed for the same structural reason because it did not remove
+the upstream disagreement before the residual path.

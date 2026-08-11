@@ -438,14 +438,12 @@ around `0.38` in the earlier layer runs. The tolerance of `0.05` is therefore
 only a single-layer diagnostic bound; it is not evidence that 43 chained layers
 preserve the prompt.
 
-The exact expert-selection probe compares sorted top-k index sets, with no
-floating-point tolerance. On the same synthetic input, layers 0, 1, 2, 4, and
-5 agreed exactly. Layer 3 was the first mismatch: at token 3, the unsharded
-set was `[12, 21, 24, 30, 69, 111]` and the sharded set was
-`[12, 21, 24, 30, 69, 109]`. The other five experts were identical. This is
-discrete evidence that the continuous drift can cross the MoE top-k boundary;
-it does not by itself prove that the live prompt-irrelevant output is caused by
-this path.
+The independent same-input expert-selection probe compared sorted top-k index
+sets with no floating-point tolerance. It found a layer-3 mismatch at token 3:
+the unsharded set was `[12, 21, 24, 30, 69, 111]` and the sharded set was
+`[12, 21, 24, 30, 69, 109]`; the other five experts were identical. This was
+an isolated-layer diagnostic with a fresh synthetic input, not the end-to-end
+depth finding, and is superseded below by the genuinely chained audit.
 
 The new chained two-process harness feeds each output into the next layer and
 reports the accumulated full-state delta:
@@ -460,12 +458,12 @@ reports the accumulated full-state delta:
 | 16 | `0.90625` | `0.561247` |
 
 This is systemic accumulated drift with a sharp increase after depth 8, not a
-layer-3-only exception. The first observed routing discontinuity is at layer 3
-under the independent same-input probe; the next experiment should capture
-routing sets while running the genuinely chained path, then test precision
-stability rather than treating `--float32-hyper` as a complete fix. The live
-nonce result remains unchanged: conditioning is confirmed broken, but this
-local chain has not yet been run end-to-end on the live two-rank instance.
+layer-3-only exception. The independent layer-3 mismatch above is superseded
+as the end-to-end finding: in the chained BF16 run, layers 0-7 agreed and layer
+8 was the first routing mismatch. That chained result is the one aligned with
+the depth-8/9 knee and is the accepted localization for the baseline path.
+The live nonce result remains unchanged: conditioning is confirmed broken, but
+this local chain has not yet been run end-to-end on the live two-rank instance.
 
 ### 2026-08-11 precision policy and full-depth routing audit
 
@@ -499,6 +497,27 @@ reproducible local mechanism for the live conditioning failure: accumulated
 distributed numerical drift eventually flips a near-tied MoE routing decision,
 after which the residual streams diverge qualitatively. It remains local
 evidence rather than a live two-node fix, and conditioning is still open.
+
+The broad-float32 43-layer routing audit did not meet the zero-mismatch
+criterion. It kept the hidden state and hyper-connection path in float32 on
+both local ranks while leaving quantized weights quantized. Layers 0-24 agreed;
+layer 25 was the first mismatch, and layers 26-42 also mismatched. Depth 43
+was `max_abs=10.1784`, mean absolute delta `0.351607`, reference scale
+`3.20986`. Broad float32 therefore removes the early knee and greatly reduces
+drift through depth 16, but it is not yet a known-good end-to-end configuration
+and was not used for a live nonce probe.
+Because the broad configuration failed the routing gate, the corresponding live
+16K/32K memory window was not run; the existing hard 32K ceiling and single
+64K watchdog panic remain the operational record.
+
+The gate-only result is intentionally counter-intuitive: casting MoE gate
+inputs to float32 made depth-16 drift worse (`1.01562` versus BF16 `0.90625`).
+BF16 can mask near-tied logits by rounding both paths to the same value; the
+float32 gate exposes a disagreement already present upstream and can make the
+routing decision diverge sooner. This means precision belongs upstream, where
+the hidden-state disagreement is introduced, rather than only at the discrete
+decision point. Sinkhorn-only failed for the same structural reason: it did not
+remove the upstream disagreement before the residual path.
 
 The earlier `--float32-hyper` result (`max_abs=0.000487` at layer 3) should be
 read as a precision-stability result: the wider float32 path bought enough
