@@ -36,10 +36,10 @@ pub fn cfg(
     cfg.insert_json5("scouting/multicast/enabled", "false")?;
     cfg.insert_json5("scouting/multicast/autoconnect", "[]")?;
     cfg.insert_json5("scouting/gossip/multihop", "true")?;
-    cfg.insert_json5(
-        "connect/endpoints",
-        &serde_json::to_string(bootstrap_endpoints)?,
-    )?;
+    // Rust's debug representation for a Vec<String> is a JSON5-compatible
+    // array of quoted strings, so this does not add a networking dependency
+    // solely to serialize the endpoint list.
+    cfg.insert_json5("connect/endpoints", &format!("{bootstrap_endpoints:?}"))?;
     cfg.insert_json5("adminspace/enabled", "true")?;
     //cfg.insert_json5("transport/link/tx/batch_size", "9216")?;
     cfg.insert_json5("transport/link/rx/buffer_size", "16777216")?;
