@@ -58,7 +58,9 @@ class _ParityModule(Protocol):
         prefix: str,
     ) -> bool | object: ...
 
-    def remapped_layer_uses_hash_routing(self, config: Mapping[str, object]) -> bool: ...
+    def remapped_layer_uses_hash_routing(
+        self, config: Mapping[str, object]
+    ) -> bool: ...
 
     def build_omlx_prefill_mask(
         self,
@@ -68,7 +70,9 @@ class _ParityModule(Protocol):
         build_mask: Callable[[int, int, int, int, int], object],
     ) -> object: ...
 
-    def new_omlx_prefill_cache(self, container: object, *, compress_ratio: int) -> object: ...
+    def new_omlx_prefill_cache(
+        self, container: object, *, compress_ratio: int
+    ) -> object: ...
 
     def omlx_attention_cache_facts(
         self, attention: object, cache: object
@@ -85,7 +89,9 @@ class _ParityModule(Protocol):
 
     def omlx_package_guard_paths(self, root: Path) -> tuple[str, ...]: ...
 
-    def actual_moe_output(self, block: object, hidden: object, input_ids: object) -> object: ...
+    def actual_moe_output(
+        self, block: object, hidden: object, input_ids: object
+    ) -> object: ...
 
 
 def _parity_module() -> _ParityModule:
@@ -299,7 +305,9 @@ def test_compressed_prefill_uses_the_omlx_pool_cache_contract() -> None:
         def make_cache(self) -> list[_CacheList]:
             return [_CacheList()]
 
-    cache = cast(_CacheList, parity.new_omlx_prefill_cache(_ReferenceModel(), compress_ratio=4))
+    cache = cast(
+        _CacheList, parity.new_omlx_prefill_cache(_ReferenceModel(), compress_ratio=4)
+    )
 
     assert cache.caches[0] is local_cache
     assert cache.caches[1] is compressor_pool
@@ -372,7 +380,9 @@ def test_omlx_import_preparation_disables_bytecode_before_path_insertion(
     assert sys.path[0] == str(tmp_path)
 
 
-def test_omlx_package_guard_covers_patch_and_custom_kernel_files(tmp_path: Path) -> None:
+def test_omlx_package_guard_covers_patch_and_custom_kernel_files(
+    tmp_path: Path,
+) -> None:
     parity = _parity_module()
     root = tmp_path / "omlx"
     patch_tree = root / parity.OMLX_IMPORTED_PACKAGE_TREE / "patches" / "deepseek_v4"
@@ -402,7 +412,10 @@ def test_actual_moe_output_uses_the_block_ffn_call() -> None:
     class _Block:
         ffn = _FFN()
 
-    assert parity.actual_moe_output(_Block(), "hidden", "input-ids") == "production-moe-output"
+    assert (
+        parity.actual_moe_output(_Block(), "hidden", "input-ids")
+        == "production-moe-output"
+    )
     assert calls == [("hidden", "input-ids")]
 
 
