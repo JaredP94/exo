@@ -199,6 +199,9 @@ the Zenoh namespace contract, both `exo_rs` binaries must contain `namespaces/`
 and the running peers must declare the same namespace-prefixed EXO topics.
 Record the MLX and `mlx_lm` versions as well. Do not require native-binary
 hashes to match: Rust builds embed host-specific paths and toolchain details.
+`uv run` resynchronises the editable package and can silently revert a locally
+built extension; use `uv run --no-sync` and record the extension SHA before and
+after any test run that must exercise freshly built Rust.
 
 ```bash
 EXO_ZENOH_NAMESPACE=dsv4f-0731-validation \
