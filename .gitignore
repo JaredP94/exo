@@ -38,6 +38,7 @@ bench/**/*.json
 # tmp
 tmp/models
 /build/exo
+/.worktrees/
 /.agents
 /.claude/skills
 /.claude

@@ -33,6 +33,10 @@ from exo.utils.task_group import TaskGroup
 from exo.worker.main import Worker
 
 
+def _parse_bootstrap_peers(value: str) -> list[str]:
+    return [peer for item in value.split(",") if (peer := item.strip())]
+
+
 @dataclass
 class Node:
     router: Router
@@ -58,6 +62,7 @@ class Node:
             namespace=args.namespace,
             listen_port=args.zenoh_port,
             discovery_service_port=args.discovery_port,
+            bootstrap_endpoints=args.bootstrap_peers,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
@@ -350,7 +355,7 @@ def main_inner(args: "Args"):
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
 
     if args.bootstrap_peers:
-        raise ValueError("Bootstrap peers has been temporarily removed")
+        logger.info(f"Zenoh bootstrap endpoints: {args.bootstrap_peers}")
 
     if args.no_batch:
         os.environ["EXO_NO_BATCH"] = "1"
@@ -457,19 +462,17 @@ class Args(FrozenModel):
         )
         parser.add_argument(
             "--bootstrap-peers",
-            type=lambda s: [p for p in s.split(",") if p],
-            default=os.getenv("EXO_BOOTSTRAP_PEERS", "").split(",")
-            if os.getenv("EXO_BOOTSTRAP_PEERS")
-            else [],
+            type=_parse_bootstrap_peers,
+            default=_parse_bootstrap_peers(os.getenv("EXO_BOOTSTRAP_PEERS", "")),
             dest="bootstrap_peers",
-            help="Comma-separated libp2p multiaddrs to dial on startup (env: EXO_BOOTSTRAP_PEERS)",
+            help="Comma-separated Zenoh endpoints to dial on startup, for example tcp/169.254.233.2:52414 (env: EXO_BOOTSTRAP_PEERS)",
         )
         parser.add_argument(
             "--namespace",
             type=str,
-            default=__version__,
+            default=os.getenv("EXO_ZENOH_NAMESPACE", __version__),
             dest="namespace",
-            help="Discovery namespace, nodes with different namespaces will not connect.",
+            help="Cluster namespace; nodes with different namespaces do not exchange EXO topics or liveliness, including through bootstrap peers.",
         )
         parser.add_argument(
             "--zenoh-port",

@@ -27,6 +27,12 @@ from exo.worker.engines.mlx.types import Model
 from exo.worker.engines.mlx.utils_mlx import (
     detect_thinking_prompt_suffix,
 )
+from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
+    dsml_token as v4_dsml_token,
+)
+from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
+    tool_calls_block_name as v4_tool_calls_block_name,
+)
 from exo.worker.engines.mlx.vendor.dsml_encoding import parse_dsml_output
 from exo.worker.runner.bootstrap import logger
 from exo.worker.runner.llm_inference.tool_parsers import ToolParser
@@ -243,9 +249,8 @@ def parse_deepseek_v32(
 def parse_deepseek_v4(
     responses: Generator[GenerationResponse | None],
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
-    dsml_token = "｜DSML｜"
-    start = f"<{dsml_token}tool_calls>"
-    end = f"</{dsml_token}tool_calls>"
+    start = f"<{v4_dsml_token}{v4_tool_calls_block_name}>"
+    end = f"</{v4_dsml_token}{v4_tool_calls_block_name}>"
     return _parse_dsml_stream(responses, start, end, parse_dsml_output)
 
 
@@ -261,6 +266,36 @@ def _parse_dsml_stream(
     pending_buffer: list[GenerationResponse] = []
     # Text accumulated during a tool call block
     tool_call_text = ""
+
+    def _flush_pre_marker_text(
+        pre_text: str, response: GenerationResponse
+    ) -> Generator[GenerationResponse]:
+        """Emit the text preceding a tool-call marker, then drop the buffer.
+
+        Buffered responses carry their own metadata, so they are reused oldest
+        first. Text left over once the buffer is exhausted came from `response`
+        itself — a marker arriving in the same chunk as visible prose — and is
+        emitted under that response's metadata rather than dropped.
+        """
+        remaining = pre_text
+        while remaining and pending_buffer:
+            buffered = pending_buffer.pop(0)
+            chunk = buffered.text
+            if len(chunk) <= len(remaining):
+                yield buffered
+                remaining = remaining[len(chunk) :]
+            else:
+                yield buffered.model_copy(update={"text": remaining})
+                remaining = ""
+        pending_buffer.clear()
+        if remaining:
+            yield response.model_copy(
+                update={
+                    "text": remaining,
+                    "finish_reason": None,
+                    **_SECONDARY_PIECE,
+                }
+            )
 
     def _try_parse_tool_call(
         text: str, response: GenerationResponse
@@ -279,23 +314,38 @@ def _parse_dsml_stream(
             continue
 
         if response.finish_reason is not None:
-            yield from pending_buffer
-            pending_buffer.clear()
             if in_tool_call:
+                yield from pending_buffer
+                pending_buffer.clear()
                 tool_call_text += response.text
                 yield (
                     _try_parse_tool_call(tool_call_text, response)
                     if tool_calls_end in tool_call_text
                     else response.model_copy(update={"text": tool_call_text})
                 )
-            elif tool_calls_start in response.text and tool_calls_end in response.text:
-                dsml_start = response.text.index(tool_calls_start)
-                before = response.text[:dsml_start]
-                if before:
-                    yield response.model_copy(update={"text": before})
-                yield _try_parse_tool_call(response.text[dsml_start:], response)
             else:
-                yield response
+                # `accumulated` holds the buffered text that has not been emitted
+                # yet, which is where a start marker split across this response
+                # and its predecessors lives. Inspecting only `response.text`
+                # flushed that partial marker as visible text and lost the call.
+                combined = accumulated + response.text
+                if tool_calls_start in combined:
+                    start_idx = combined.index(tool_calls_start)
+                    yield from _flush_pre_marker_text(combined[:start_idx], response)
+                    block = combined[start_idx:]
+                    yield (
+                        _try_parse_tool_call(block, response)
+                        if tool_calls_end in block
+                        else response.model_copy(update={"text": block})
+                    )
+                else:
+                    yield from pending_buffer
+                    pending_buffer.clear()
+                    yield response
+            # Every branch above has already emitted the buffer; clearing it
+            # again keeps the tail flush after the loop from double-emitting if
+            # one of them ever stops doing so.
+            pending_buffer.clear()
             break
 
         if in_tool_call:
@@ -310,20 +360,7 @@ def _parse_dsml_stream(
 
         if tool_calls_start in accumulated:
             start_idx = accumulated.index(tool_calls_start)
-            pre_text = accumulated[:start_idx]
-            # Flush pending buffer tokens that contributed text before the marker
-            if pre_text:
-                for buf_resp in pending_buffer:
-                    if not pre_text:
-                        break
-                    chunk = buf_resp.text
-                    if len(chunk) <= len(pre_text):
-                        yield buf_resp
-                        pre_text = pre_text[len(chunk) :]
-                    else:
-                        yield buf_resp.model_copy(update={"text": pre_text})
-                        pre_text = ""
-            pending_buffer = []
+            yield from _flush_pre_marker_text(accumulated[:start_idx], response)
             tool_call_text = accumulated[start_idx:]
             accumulated = ""
 
@@ -358,6 +395,33 @@ def _could_be_marker_prefix(text: str, marker: str) -> bool:
     return False
 
 
+# Applied to the second and later pieces of one response's text. The response
+# stands for a single token, so its logprob, stats and usage belong to exactly
+# one emitted chunk: `collect_chat_response` appends a `Logprobs.content` entry
+# per chunk carrying a logprob, and `count_reasoning_tokens` counts responses.
+_SECONDARY_PIECE: dict[str, object] = {
+    "logprob": None,
+    "top_logprobs": None,
+    "stats": None,
+    "usage": None,
+}
+
+
+def _longest_marker_candidate_suffix(text: str, *markers: str | None) -> int:
+    """Length of the longest suffix of `text` that could still become a marker.
+
+    Zero when none can. Comparing the WHOLE buffer against `marker[:len(buffer)]`
+    instead misses a marker preceded by visible text in the same window, so the
+    marker leaks into visible content.
+    """
+    longest_marker = max((len(marker) for marker in markers if marker), default=0)
+    for length in range(min(len(text), longest_marker), 0, -1):
+        suffix = text[-length:]
+        if any(marker and marker.startswith(suffix) for marker in markers):
+            return length
+    return 0
+
+
 def parse_thinking_models(
     responses: Generator[GenerationResponse | None],
     think_start: str | None,
@@ -368,49 +432,149 @@ def parse_thinking_models(
 
     Swallows think tag tokens, sets is_thinking on all others.
     Always yields tokens with finish_reason to avoid hanging the chunk stream.
+
+    A marker can arrive split across responses and can share a response with
+    visible text on either side. Only the suffix of the buffer that could still
+    become a marker is held back; everything before it is emitted immediately
+    under its own response's metadata.
+
+    Note that this sees text, not token ids, so a literal `<think>` in ordinary
+    content is indistinguishable from the marker and is treated as the marker.
+
+    One shape is deliberately not handled: any content carried by the terminal
+    response itself is reported as `is_thinking=False`, even reasoning that
+    began on an earlier response, because a terminal response is contractually
+    not thinking.
     """
     is_thinking = starts_in_thinking
     accumulated = ""
+    # Invariant: "".join(r.text for r in pending_buffer) == accumulated
     pending_buffer: list[GenerationResponse] = []
 
-    def drain_pending(_is_thinking: bool):
-        for buffered in pending_buffer:
-            yield buffered.model_copy(update={"is_thinking": _is_thinking})
-        pending_buffer.clear()
+    def _next_marker(text: str, _is_thinking: bool) -> tuple[int, str, bool] | None:
+        """Earliest marker occurrence in `text` that would change state."""
+        found: tuple[int, str, bool] | None = None
+        for marker, target in ((think_start, True), (think_end, False)):
+            if not marker or _is_thinking == target:
+                continue
+            index = text.find(marker)
+            if index != -1 and (found is None or index < found[0]):
+                found = (index, marker, target)
+        return found
+
+    def _emit(
+        char_count: int, _is_thinking: bool, *, split: bool = False
+    ) -> Generator[GenerationResponse]:
+        """Emit the first `char_count` buffered characters, keeping metadata.
+
+        `split=False` stops at the last whole response that fits, so an ordinary
+        hold-back never divides a response: `count_reasoning_tokens` counts
+        responses, not tokens, and would over-report. Splitting is used only
+        either side of a marker, where the pieces after the first are stripped
+        of the metadata that must be emitted once (`_SECONDARY_PIECE`).
+        """
+        nonlocal accumulated
+        remaining = char_count
+        while pending_buffer:
+            buffered = pending_buffer[0]
+            chunk = buffered.text
+            if len(chunk) <= remaining:
+                _ = pending_buffer.pop(0)
+                yield buffered.model_copy(update={"is_thinking": _is_thinking})
+                remaining -= len(chunk)
+            elif split and remaining > 0:
+                pending_buffer[0] = buffered.model_copy(
+                    update={"text": chunk[remaining:], **_SECONDARY_PIECE}
+                )
+                yield buffered.model_copy(
+                    update={"text": chunk[:remaining], "is_thinking": _is_thinking}
+                )
+                remaining = 0
+            else:
+                break
+        accumulated = "".join(buffered.text for buffered in pending_buffer)
+
+    def _discard(char_count: int) -> None:
+        """Drop the first `char_count` buffered characters without emitting."""
+        nonlocal accumulated
+        remaining = char_count
+        while remaining > 0 and pending_buffer:
+            buffered = pending_buffer[0]
+            chunk = buffered.text
+            if len(chunk) <= remaining:
+                _ = pending_buffer.pop(0)
+                remaining -= len(chunk)
+            else:
+                pending_buffer[0] = buffered.model_copy(
+                    update={"text": chunk[remaining:]}
+                )
+                remaining = 0
+        accumulated = "".join(buffered.text for buffered in pending_buffer)
 
     for response in responses:
         if response is None:
             yield None
             continue
 
+        if response.finish_reason is not None:
+            # The held buffer is a partial marker candidate; the terminal
+            # response can be what completes it. Flushing the buffer without
+            # looking leaks the marker into visible content.
+            held = accumulated
+            combined = held + response.text
+            first = _next_marker(combined, is_thinking)
+            if first is None:
+                yield from _emit(len(accumulated), is_thinking)
+                yield response.model_copy(update={"is_thinking": False})
+                continue
+
+            index, marker, target = first
+            yield from _emit(min(index, len(held)), is_thinking, split=True)
+            pending_buffer.clear()
+            accumulated = ""
+            # Text between markers that the terminal response contributed needs
+            # its own non-terminal carrier, since the terminal yield below is
+            # reserved for the text after the last marker. The carriers repeat
+            # the terminal response's token id but not its logprob, stats or
+            # usage, which the terminal yield keeps.
+            segments: list[tuple[str, bool]] = []
+            if index > len(held):
+                segments.append((combined[len(held) : index], is_thinking))
+            is_thinking = target
+            rest = combined[index + len(marker) :]
+            while (found := _next_marker(rest, is_thinking)) is not None:
+                index, marker, target = found
+                if index:
+                    segments.append((rest[:index], is_thinking))
+                is_thinking = target
+                rest = rest[index + len(marker) :]
+            for text, segment_is_thinking in segments:
+                yield response.model_copy(
+                    update={
+                        "text": text,
+                        "is_thinking": segment_is_thinking,
+                        "finish_reason": None,
+                        **_SECONDARY_PIECE,
+                    }
+                )
+            yield response.model_copy(update={"text": rest, "is_thinking": False})
+            continue
+
+        pending_buffer.append(response)
         accumulated += response.text
 
-        if response.finish_reason is not None:
-            yield from drain_pending(is_thinking)
-            yield response.model_copy(update={"is_thinking": False})
-            continue
+        # `find`, not `endswith`: a marker followed by visible text in the same
+        # response would otherwise never be recognised, leaking the marker and
+        # wedging `is_thinking` for the rest of the stream. Looping handles a
+        # window holding the end of one marker and the start of the next.
+        while (found := _next_marker(accumulated, is_thinking)) is not None:
+            index, marker, target = found
+            yield from _emit(index, is_thinking, split=True)
+            _discard(len(marker))
+            is_thinking = target
 
-        if accumulated == think_start and not is_thinking:
-            is_thinking = True
-            accumulated = ""
-            pending_buffer.clear()
-            continue
-        if accumulated == think_end and is_thinking:
-            is_thinking = False
-            accumulated = ""
-            pending_buffer.clear()
-            continue
-
-        if (think_start and accumulated == think_start[: len(accumulated)]) or (
-            think_end and accumulated == think_end[: len(accumulated)]
-        ):
-            pending_buffer.append(response)
-            continue
-
-        accumulated = ""
-
-        yield from drain_pending(is_thinking)
-        yield response.model_copy(update={"is_thinking": is_thinking})
+        hold = _longest_marker_candidate_suffix(accumulated, think_start, think_end)
+        yield from _emit(len(accumulated) - hold, is_thinking)
 
 
 def parse_tool_calls(

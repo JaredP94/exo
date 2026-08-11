@@ -64,11 +64,19 @@ impl PyNetworkingHandle {
     // ---- Lifecycle management methods ----
 
     #[staticmethod]
+    #[pyo3(signature = (
+        identity,
+        namespace,
+        listen_port,
+        discovery_service_port,
+        bootstrap_endpoints = None
+    ))]
     pub fn new(
         identity: &str,
         namespace: &str,
         listen_port: u16,
         discovery_service_port: u16,
+        bootstrap_endpoints: Option<Vec<String>>,
     ) -> PyResult<PyNetworkingHandle> {
         // todo: zenoh self assigned peers
         if listen_port == 0 {
@@ -85,6 +93,7 @@ impl PyNetworkingHandle {
         }
 
         // create networking swarm (within tokio context!! or it crashes)
+        let bootstrap_endpoints = bootstrap_endpoints.unwrap_or_default();
         let swarm = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(create_swarm(
                 identity,
@@ -92,6 +101,7 @@ impl PyNetworkingHandle {
                 from_client,
                 listen_port,
                 discovery_service_port,
+                &bootstrap_endpoints,
             ))
             .pyerr()?;
 

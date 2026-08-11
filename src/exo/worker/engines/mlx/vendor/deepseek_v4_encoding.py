@@ -24,6 +24,12 @@ USER_SP_TOKEN = "<｜User｜>"
 ASSISTANT_SP_TOKEN = "<｜Assistant｜>"
 LATEST_REMINDER_SP_TOKEN = "<｜latest_reminder｜>"
 
+# The open-weight 0731 encoding has no role delimiter for a system message
+# after the conversation starts. Expose this capability explicitly so callers
+# do not mistake raw marker ordering for model-level support. The single safe
+# shape is handled by relocate_mid_system_messages() below.
+supports_mid_system_messages = False
+
 # Task special tokens for internal classification tasks
 DS_TASK_SP_TOKENS = {
     "action": "<｜action｜>",
@@ -57,11 +63,23 @@ tool_calls_block_name: str = "tool_calls"
 
 tool_output_template: str = "<tool_result>{content}</tool_result>"
 
-REASONING_EFFORT_MAX = (
-    "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
-    "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
-    "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
-)
+# Reasoning effort levels. In thinking mode, the prompt for the selected level is
+# prepended at the very beginning of the conversation. `low` is the default and
+# adds nothing.
+REASONING_EFFORT_PROMPTS: Dict[str, str] = {
+    "low": "",
+    "high": (
+        "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n"
+        "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n"
+        "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n"
+    ),
+    "max": (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n"
+    ),
+}
+DEFAULT_REASONING_EFFORT = "low"
 
 TOOLS_TEMPLATE = """## Tools
 
@@ -245,7 +263,8 @@ def render_message(
         messages: Full list of messages in the conversation.
         thinking_mode: Either "chat" or "thinking".
         drop_thinking: Whether to drop reasoning content from earlier turns.
-        reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+        reasoning_effort: Optional encoder tier ("low", "high", "max", or None).
+                          None is normalized to DEFAULT_REASONING_EFFORT.
 
     Returns:
         Encoded string for this message.
@@ -272,12 +291,14 @@ def render_message(
     if tool_calls:
         tool_calls = tool_calls_from_openai_format(tool_calls)
 
-    # Reasoning effort prefix (only at index 0 in thinking mode with max effort)
-    assert reasoning_effort in ["max", None, "high"], (
-        f"Invalid reasoning effort: {reasoning_effort}"
+    # Reasoning effort prefix (only at index 0 in thinking mode; "low" adds nothing)
+    reasoning_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
+    assert reasoning_effort in REASONING_EFFORT_PROMPTS, (
+        f"Invalid reasoning effort: {reasoning_effort}, "
+        f"expected one of {list(REASONING_EFFORT_PROMPTS)}"
     )
-    if index == 0 and thinking_mode == "thinking" and reasoning_effort == "max":
-        prompt += REASONING_EFFORT_MAX
+    if index == 0 and thinking_mode == "thinking":
+        prompt += REASONING_EFFORT_PROMPTS[reasoning_effort]
 
     if role == "system":
         prompt += system_msg_template.format(content=content or "")
@@ -439,6 +460,90 @@ def render_message(
 # ============================================================
 
 
+def _latest_reminder_content_as_text(content: Any) -> Optional[str]:
+    """Return text-only system content, or None for unsupported content."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+
+    parts = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type", "text") != "text":
+            return None
+        text = block.get("text", "")
+        if text is not None and not isinstance(text, str):
+            return None
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def relocate_mid_system_messages(
+    messages: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """Move supported inline system runs to V4 ``latest_reminder`` context.
+
+    Claude Code appends a volatile system message immediately after the user
+    message it qualifies. The V4 reference encoder has no delimiter for that
+    raw placement. Reclassify the system run as a new ``latest_reminder``
+    context immediately before the same user, preserving append-only prompt
+    caching across requests.
+
+    Only the observed ``user -> system -> (assistant | end)`` shape is
+    rewritten. Other placements and non-leading developer messages return
+    None so the caller can use its configured fallback.
+    """
+    source = [copy.deepcopy(message) for message in messages]
+    relocated: List[Dict[str, Any]] = []
+    seen_non_system = False
+    index = 0
+
+    while index < len(source):
+        message = source[index]
+        if message.get("role") != "system":
+            relocated.append(message)
+            seen_non_system = True
+            index += 1
+            continue
+
+        start = index
+        parts = []
+        while index < len(source) and source[index].get("role") == "system":
+            text = _latest_reminder_content_as_text(source[index].get("content"))
+            if text is None:
+                return None
+            if text:
+                parts.append(text)
+            index += 1
+
+        if not seen_non_system:
+            relocated.extend(source[start:index])
+            continue
+
+        next_role = source[index].get("role") if index < len(source) else None
+        if (
+            not relocated
+            or relocated[-1].get("role") != "user"
+            or next_role not in {None, "assistant"}
+        ):
+            return None
+
+        associated_user = relocated.pop()
+        if parts:
+            relocated.append(
+                {
+                    "role": "latest_reminder",
+                    "content": "\n\n".join(parts),
+                }
+            )
+        relocated.append(associated_user)
+
+    return relocated
+
+
 def merge_tool_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Merge tool messages into the preceding user message using content_blocks format.
@@ -584,7 +689,8 @@ def encode_messages(
         drop_thinking: If True, drop reasoning_content from earlier assistant turns
                       (only keep reasoning for messages after the last user message).
         add_default_bos_token: Whether to prepend BOS token at conversation start.
-        reasoning_effort: Optional reasoning effort level ("max", "high", or None).
+        reasoning_effort: Optional encoder tier ("low", "high", "max", or None).
+                          None is normalized to DEFAULT_REASONING_EFFORT.
 
     Returns:
         The encoded prompt string.

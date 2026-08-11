@@ -46,11 +46,16 @@ async def check_reachability(
             remote_node_id = NodeId(body)
             break
 
-        # expected failure cases
+        # A transport failure for one advertised interface must not abort the
+        # task group, because the remaining interfaces may still reach the
+        # peer.  httpx normally wraps these errors, but preserve the same
+        # verdict if a lower-level socket exception escapes from the client.
         except (
             httpx.TimeoutException,
             httpx.NetworkError,
-        ):
+            OSError,
+        ) as e:
+            logger.debug(f"connect failed from {target_ip}: {e}")
             await anyio.sleep(1)
 
         # other failures should be logged on last attempt
@@ -105,7 +110,18 @@ async def check_reachable(
     ) -> None:
         async with send:
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
-            await check_reachability(target_ip, expected_node_id, out, client, api_port)
+            try:
+                await check_reachability(
+                    target_ip, expected_node_id, out, client, api_port
+                )
+            except Exception:
+                # Each advertised interface is an independent probe.  Keep a
+                # malformed or failing peer from cancelling the task group so
+                # healthy peers can still publish their reachability result.
+                logger.exception(
+                    f"reachability probe failed for {target_ip} ({expected_node_id})"
+                )
+                return
             if expected_node_id in out:
                 await send.send((target_ip, expected_node_id))
 

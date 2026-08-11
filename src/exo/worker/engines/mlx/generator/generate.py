@@ -572,16 +572,13 @@ def mlx_generate(
         all_prompt_tokens = vision.prompt_tokens
     media_regions: list[MediaRegion] = vision.media_regions if vision else []
 
-    # Do not use the prefix cache if we are trying to do benchmarks.
     is_bench = task.bench
-    if is_bench and not task.use_prefix_cache:
-        kv_prefix_cache = None
 
     # Use prefix cache if available, otherwise create fresh cache
     prefix_hit_length = 0
     matched_index: int | None = None
     is_exact_hit = False
-    if kv_prefix_cache is None:
+    if kv_prefix_cache is None or not task.use_prefix_cache:
         caches = make_kv_cache(model=model)
         prompt_tokens = all_prompt_tokens
     else:
@@ -678,7 +675,7 @@ def mlx_generate(
     if kv_prefix_cache is not None and matched_index is not None and is_exact_hit:
         prefill_tps = kv_prefix_cache.prefill_tps[matched_index]
 
-    if kv_prefix_cache is not None:
+    if kv_prefix_cache is not None and task.use_prefix_cache:
         hit_ratio = (
             prefix_hit_length / len(all_prompt_tokens)
             if len(all_prompt_tokens) > 0

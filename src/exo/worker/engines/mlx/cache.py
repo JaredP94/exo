@@ -316,6 +316,7 @@ class KVPrefixCache:
         model: Model,
         prompt_tokens: mx.array,
         media_regions: list["MediaRegion"] | None = None,
+        use_prefix_cache: bool = True,
     ) -> tuple[KVCacheType, mx.array, int | None, bool]:
         """Get KV cache for prompt, returning remaining tokens to prefill.
 
@@ -334,6 +335,9 @@ class KVPrefixCache:
         a cached media region whose content_hash differs from the query's, the
         match is truncated to the start of that region.
         """
+        if not use_prefix_cache:
+            return make_kv_cache(model), prompt_tokens, None, False
+
         max_length = len(prompt_tokens)
         query_regions = media_regions or []
 

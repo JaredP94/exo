@@ -6,7 +6,7 @@ import tempfile
 import time
 from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     from exo.worker.engines.mlx.vision import VisionProcessor
@@ -38,14 +38,17 @@ import contextlib
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm.utils import load_model
 from pydantic import RootModel
 
 from exo.download.download_utils import build_model_path
 from exo.shared.types.common import Host
 from exo.shared.types.memory import Memory
 from exo.shared.types.tasks import TaskId, TextGeneration
-from exo.shared.types.text_generation import ChatTemplateValue, TextGenerationTaskParams
+from exo.shared.types.text_generation import (
+    ChatTemplateValue,
+    ReasoningEffort,
+    TextGenerationTaskParams,
+)
 from exo.shared.types.worker.instances import (
     BoundInstance,
     MlxJacclInstance,
@@ -64,6 +67,12 @@ from exo.worker.engines.mlx.auto_parallel import (
     pipeline_auto_parallel,
     tensor_auto_parallel,
 )
+from exo.worker.engines.mlx.deepseek_v4_0731_config import (
+    inspect_deepseek_v4_0731_checkpoint,
+    normalized_quantization_specs,
+    validate_deepseek_v4_0731_shard_geometry,
+)
+from exo.worker.engines.mlx.deepseek_v4_0731_loader import load_exo_model
 from exo.worker.engines.mlx.types import Model
 from exo.worker.runner.bootstrap import logger
 
@@ -172,7 +181,7 @@ def load_mlx_items(
         logger.info(f"Single device used for {bound_instance.instance}")
         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
         start_time = time.perf_counter()
-        model, _ = load_model(model_path, lazy=True, strict=False)
+        model, _ = load_exo_model(model_path, lazy=True, strict=False)
         # Eval layers one by one for progress reporting
         try:
             inner = get_inner_model(model)
@@ -235,7 +244,7 @@ def shard_and_load(
 ) -> Generator[ModelLoadingResponse, None, tuple[nn.Module, TokenizerWrapper]]:
     model_path = build_model_path(shard_metadata.model_card.model_id)
 
-    model, _ = load_model(model_path, lazy=True, strict=False)
+    model, config = load_exo_model(model_path, lazy=True, strict=False)
     logger.debug(model)
     if hasattr(model, "model") and isinstance(model.model, DeepseekV3Model):  # type: ignore
         pass
@@ -255,6 +264,15 @@ def shard_and_load(
         #    )
 
     assert isinstance(model, nn.Module)
+
+    if _is_0731_config(config):
+        checkpoint = inspect_deepseek_v4_0731_checkpoint(model_path)
+        if checkpoint is not None:
+            validate_deepseek_v4_0731_shard_geometry(
+                config,
+                normalized_quantization_specs(config),
+                group.size(),
+            )
 
     tokenizer = get_tokenizer(model_path, shard_metadata)
 
@@ -284,6 +302,21 @@ def shard_and_load(
     mx_barrier(group)
 
     return model, tokenizer
+
+
+def _is_0731_config(config: dict[str, Any]) -> bool:
+    """Avoid checkpoint preflight for ordinary model configs."""
+    target_layers_value = cast(object, config.get("dspark_target_layer_ids"))
+    if not isinstance(target_layers_value, list):
+        return False
+    target_layers = cast(list[object], target_layers_value)
+    return (
+        config.get("model_type") == "deepseek_v4"
+        and isinstance(config.get("dspark_block_size"), int)
+        and not isinstance(config.get("dspark_block_size"), bool)
+        and config["dspark_block_size"] > 0
+        and len(target_layers) > 0
+    )
 
 
 def get_tokenizer(model_path: Path, shard_metadata: ShardMetadata) -> TokenizerWrapper:
@@ -490,13 +523,39 @@ def _needs_v4_encoding(task_params: TextGenerationTaskParams) -> bool:
     return "deepseek-v4" in task_params.model.lower()
 
 
-def _v4_reasoning_effort(task_params: TextGenerationTaskParams) -> str | None:
+V4EncoderEffort = Literal["low", "high", "max"]
+
+# EXO's public effort scale is wider than the encoder's three V4 tiers. The
+# table is total over `ReasoningEffort` so the lookup below needs no fallback;
+# a new public value added without a tier fails the coverage test rather than
+# raising at request time.
+V4_REASONING_EFFORT_MAP: dict[ReasoningEffort, V4EncoderEffort | None] = {
+    "none": None,
+    "minimal": "low",
+    "low": "low",
+    "medium": "low",
+    "high": "high",
+    "xhigh": "max",
+}
+
+
+def _v4_reasoning_effort(
+    task_params: TextGenerationTaskParams,
+) -> V4EncoderEffort | None:
+    """Map EXO's public reasoning effort onto a DeepSeek V4 encoder tier.
+
+    `none` maps to `None` because `resolve_reasoning_params` pairs it with
+    thinking disabled, and a thinking-disabled request must carry no effort
+    prefix. An unspecified effort is also `None`; the encoder normalizes that
+    to `DEFAULT_REASONING_EFFORT` ("low"), whose tier text is empty.
+
+    Public `xhigh` deliberately maps to the encoder's `max` tier. `max` is not
+    added to `ReasoningEffort` itself.
+    """
     effort = task_params.reasoning_effort
-    if effort == "xhigh":
-        return "max"
-    if effort == "high":
-        return "high"
-    return None
+    if effort is None:
+        return None
+    return V4_REASONING_EFFORT_MAP[effort]
 
 
 def _strip_v4_thinking_markers(content: str) -> str:
@@ -510,6 +569,25 @@ def _strip_v4_thinking_markers(content: str) -> str:
         return content
     cleaned = block.sub("", content)
     return cleaned.replace("<think>", "").replace("</think>", "")
+
+
+def _is_v4_prefill(message: dict[str, Any]) -> bool:
+    """Whether a trailing assistant turn is a prefill the encoder should continue.
+
+    Only a turn carrying real text is one. An empty turn is the "start
+    generating" idiom, and marking it `wo_eos` would render a closed
+    `<think></think>`, silently denying a thinking-enabled request any
+    reasoning. A turn carrying `tool_calls` would render an unterminated
+    tool-call block with no following anchor. Both fall back to the historical
+    behaviour of dropping the turn, which leaves the anchor open.
+    """
+    content = message.get("content")
+    return (
+        message.get("role") == "assistant"
+        and not message.get("tool_calls")
+        and isinstance(content, str)
+        and bool(content)
+    )
 
 
 def consolidate_system_messages(
@@ -551,8 +629,84 @@ def render_chat_template(
 
     When chat_template_messages is available (from Chat Completions API),
     uses those directly to preserve tool_calls, thinking, and other fields.
+
+    DeepSeek V4 selects its message family *before* generic system
+    consolidation so a mid-conversation system message can be relocated to a
+    `latest_reminder` context instead of being hoisted into the leading system
+    prompt. Hoisting rewrites the prompt prefix on every turn and invalidates
+    the KV cache; relocation keeps the rendered transcript append-only.
+
+    DeepSeek V4 is also selected before the generic assistant-prefill handling,
+    because its encoder renders a trailing assistant turn in the content channel
+    rather than needing the turn removed and its text re-appended raw.
     """
-    formatted_messages = consolidate_system_messages(messages)
+    if _needs_v4_encoding(task_params):
+        from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
+            relocate_mid_system_messages,
+        )
+
+        relocated = relocate_mid_system_messages(messages)
+        if relocated is None:
+            logger.warning(
+                "DeepSeek V4: unsupported mid-conversation system message placement; "
+                "falling back to system consolidation. The prompt prefix will be "
+                "rewritten for this request and the KV cache will not be reused."
+            )
+        v4_source = messages if relocated is None else relocated
+        formatted_messages = consolidate_system_messages(v4_source)
+    else:
+        formatted_messages = consolidate_system_messages(messages)
+
+    # Selected before the generic prefill pop below: the V4 encoder renders a
+    # trailing assistant turn itself, in the content channel.
+    if _needs_v4_encoding(task_params):
+        from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
+            encode_messages as encode_messages_v4,
+        )
+
+        v4_messages = [dict(m) for m in formatted_messages]
+        # Historical turns only. A trailing prefill is the caller's own text and
+        # must reach the model verbatim, or their prefix stops concatenating with
+        # the completion.
+        for msg in v4_messages[:-1]:
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = _strip_v4_thinking_markers(content)
+        if task_params.tools:
+            for msg in v4_messages:
+                if msg.get("role") in ("system", "developer"):
+                    msg["tools"] = task_params.tools
+                    break
+            else:
+                v4_messages.insert(
+                    0, {"role": "system", "content": "", "tools": task_params.tools}
+                )
+
+        # A trailing prefill stays in the list and loses only its EOS: the
+        # user-to-assistant transition supplies the anchor and the assistant
+        # renderer closes the thinking block before the content, so the prefill
+        # lands in the content channel. Appending it raw after the anchor
+        # instead would feed it to the model as its own reasoning. Shapes that
+        # are not prefills keep the historical drop-and-append. `v4_messages`
+        # already holds per-message copies, so this mutation is local.
+        v4_prefill: str | None = None
+        if v4_messages and _is_v4_prefill(v4_messages[-1]):
+            v4_messages[-1]["wo_eos"] = True
+        elif v4_messages and v4_messages[-1].get("role") == "assistant":
+            v4_prefill = cast(str, v4_messages[-1].get("content", ""))
+            v4_messages = v4_messages[:-1]
+
+        prompt = encode_messages_v4(
+            messages=v4_messages,
+            thinking_mode="chat"
+            if task_params.enable_thinking is False
+            else "thinking",
+            reasoning_effort=_v4_reasoning_effort(task_params),
+        )
+        if v4_prefill:
+            prompt += v4_prefill
+        return prompt
 
     # For assistant prefilling, append content after templating to avoid a closing turn token.
     partial_assistant_content: str | None = None
@@ -570,38 +724,6 @@ def render_chat_template(
             if task_params.enable_thinking is False
             else "thinking",
             tools=task_params.tools,
-        )
-        if partial_assistant_content:
-            prompt += partial_assistant_content
-        return prompt
-
-    if _needs_v4_encoding(task_params):
-        from exo.worker.engines.mlx.vendor.deepseek_v4_encoding import (
-            encode_messages as encode_messages_v4,
-        )
-
-        v4_messages = [dict(m) for m in formatted_messages]
-        for msg in v4_messages:
-            if msg.get("role") == "assistant":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    msg["content"] = _strip_v4_thinking_markers(content)
-        if task_params.tools:
-            for msg in v4_messages:
-                if msg.get("role") in ("system", "developer"):
-                    msg["tools"] = task_params.tools
-                    break
-            else:
-                v4_messages.insert(
-                    0, {"role": "system", "content": "", "tools": task_params.tools}
-                )
-
-        prompt = encode_messages_v4(
-            messages=v4_messages,
-            thinking_mode="chat"
-            if task_params.enable_thinking is False
-            else "thinking",
-            reasoning_effort=_v4_reasoning_effort(task_params),
         )
         if partial_assistant_content:
             prompt += partial_assistant_content

@@ -1,0 +1,397 @@
+# DeepSeek V4 0731: gaps in the live validation record, and one raised defect
+
+**Date:** 2026-08-06
+**Concerns:** `docs/superpowers/validation/2026-08-04-dsv4-0731-prompt-api.md`
+(commit `ad26cd60`), and the two scripts it was produced by.
+
+This document qualifies that record. It does not dispute the local quality gate,
+which is sound and which discharged the outstanding verification on Plan 2
+Tasks 1-5. It disputes the live half.
+
+## Summary
+
+The record states that all 36 live API combinations passed, that "content and
+reasoning channels remained strictly separated, structured tool calls were
+preserved, and no DSML markup leaked into output streams", and that append-only
+prefix caching was verified. **None of those four claims is supported by the
+harness that produced them.**
+
+In `scripts/run_live_matrix_validation.py`, `PASS` is appended whenever the HTTP
+request does not raise:
+
+```python
+results.append((case_name, "ChatCompletions", "non-stream", "PASS", f"content_len=..."))
+except Exception as e:
+    results.append((case_name, "ChatCompletions", "non-stream", "FAIL", str(e)))
+```
+
+There is no assertion on channel separation, DSML leakage, `finish_reason`,
+terminal-event counts, tool-call structure, or cross-endpoint agreement. All 36
+verdicts therefore mean only: the endpoint returned 200 with parseable JSON.
+That is a liveness check.
+
+`scripts/verify_live_prefix_caching.py` prints two prompt-token counts and then
+prints `SUCCESS` unconditionally. It never renders or compares prompts and never
+reads `cached_tokens`.
+
+## What the recorded data itself shows
+
+Read as data rather than as verdicts, the committed table already contains the
+evidence that the live matrix did not exercise its subject:
+
+1. **No tool call ever fired.** Cases 5 (`single_tool`), 6 (`multi_tool`) and 7
+   (`tool_result_followup`) all record `tool_calls=False`, and all are marked
+   PASS. Tasks 4 and 5 — the entire DSML tolerance and split-delimiter effort —
+   are therefore **unvalidated live**. The claim that structured tool calls were
+   preserved is contradicted by the table it appears above.
+
+   Likely cause: `max_tokens=32`. `<｜DSML｜tool_calls>` alone is six tokens and
+   a full invoke with one parameter is 25 or more; with reasoning consuming the
+   budget first, the model cannot reach a closing marker. Cases 5 and 6 report
+   *identical* metrics (`content_len=2, reasoning_len=62`), which fits truncation
+   at the same point rather than two distinct tool behaviours.
+
+2. **`done=0` on all nine Responses streaming rows.** The script counts the
+   literal `[DONE]` sentinel, which belongs to Chat Completions; the Responses
+   API terminates with a `response.completed` event. So "terminal events appear
+   exactly once" is unverified across 18 of the 36 rows, and the harness would
+   have reported PASS with zero terminal events either way.
+
+3. **Cases 2-8 produced 1 to 3 characters of content.** At `max_tokens=32` with
+   reasoning enabled, `finish_reason` was almost certainly `length` throughout —
+   the script never records it. "No DSML markup in the content channel" is
+   vacuously true when there is almost no content to inspect.
+
+4. **Effort tiers are not differentiated.** Case 3 (`thinking_high`) reports
+   `reasoning_len=31` against case 2 (`thinking_low`) at 139. Nothing asserts the
+   tiers differ, which is Task 2's whole subject.
+
+5. **Cross-endpoint agreement is never compared**, and the Responses conversion
+   flattens `tool` messages into `user` prose, so case 7 does not exercise tool
+   results on that endpoint at all.
+
+6. **Step 8 was not performed.** `GET /` returning 200 is a liveness probe on a
+   static asset. The step asks for three conversations *through the dashboard*,
+   confirming the displayed answer excludes DSML markup and that reasoning is
+   separated in the UI.
+
+None of this implies the implementation is broken. The 27 offline tests in
+`f5dbb050` cover most of these properties properly and were mutation-tested.
+What is unproven is that the live two-node cluster exhibits them — which is the
+one thing only Task 6 could establish.
+
+## Remedy
+
+`scripts/validate_dsv4_live_api.py` replaces both scripts. Differences that
+matter:
+
+* Every check returns PASS, FAIL or INCONCLUSIVE, and `PASS` is only returned by
+  a predicate that could have returned FAIL on that input.
+* `finish_reason == "length"` yields INCONCLUSIVE, never PASS.
+* Terminal events are counted per endpoint: `[DONE]` for Chat Completions,
+  `response.completed` for Responses.
+* `max_tokens` is per-case, 512-768 for tool cases.
+* Tool calls are asserted present, counted, name-checked, and their `arguments`
+  must parse *and* survive `json.dumps(..., allow_nan=False)` — a permissive
+  `json.loads` accepts `Infinity`/`NaN`, which a strict client's `JSON.parse`
+  rejects. This is the Task 4 hole, asserted end to end.
+* Marker leakage is sought in *decoded* argument values, recursively, because
+  `json.dumps` escapes non-ASCII by default and a substring test on the wire
+  string misses an escaped `｜DSML｜`.
+* Effort tiers are checked by comparing `prompt_tokens` across otherwise
+  identical requests: the tier injects a prompt prefix, so `high` and `xhigh`
+  must differ. Collapsed tiers fail.
+* Prefix-cache reuse is evidenced by `prompt_tokens_details.cached_tokens`, with
+  a **negative control** — an unrelated prompt that must not show high cached
+  tokens. Without the control, an always-high counter reads as success.
+* Exit code is non-zero on any FAIL or INCONCLUSIVE, so it gates rather than
+  needing to be eyeballed.
+
+**`--self-test` drives every check with good and deliberately-bad synthetic
+payloads and needs neither the cluster nor MLX.** It found two real bugs in the
+harness during authoring — the raw-string leak test and the missing strict-JSON
+guard, both listed above — and now passes. Run it before spending a cluster run:
+
+```bash
+uv run python scripts/validate_dsv4_live_api.py --self-test
+uv run python scripts/validate_dsv4_live_api.py --only 5,6,7   # the tool cases first
+uv run python scripts/validate_dsv4_live_api.py
+```
+
+Start with `--only 5,6,7`. That is where the risk concentrates and where the
+previous run proved nothing.
+
+`ruff check` and `ruff format` are clean. `basedpyright` reports 93 errors, all
+from untyped JSON traversal under `reportAny` / `reportUnknownMemberType`.
+`scripts/` is outside `[tool.basedpyright] include` (`src`, `bench`, `tools`), so
+this is not CI-visible, and the two scripts it replaces are equally unchecked.
+**Raising rather than deciding:** whether `scripts` should join the include, and
+whether this harness should move to `tools/` and be typed to the strict standard
+with narrowing accessors, is Jared's call. It is not claimed to be type-clean.
+
+## Raised defect: a required `backends` field silently drops legacy custom cards
+
+Found while reconciling the cluster environment; recorded in the validation
+record as a setup fix. It is a product defect and is still live in the repo.
+
+`ModelCard.backends` is declared `list[Backend]` with no default
+(`src/exo/shared/models/model_cards.py:170`), so it is required. Cards written to
+`~/.exo/custom_model_cards/` before that field existed fail validation.
+
+`_CardCache._load_cards_from_dir` (`model_cards.py:75-87`) catches
+`ValidationError` per card and logs a warning:
+
+```python
+except (ValidationError, TOMLKitError) as e:
+    logger.opt(exception=e).warning(f"failed to validate model card at {toml_file}")
+```
+
+So the failure mode is **not** a hard startup crash — I overstated that
+initially. It is worse in one respect: the card is skipped, the model silently
+disappears from the cache, and the only signal is a warning in the log. A user
+upgrading loses their custom cards without an error.
+
+Observed on both nodes; worked around by hand-editing each legacy card to add
+`backends = ["MlxMetal", "MlxCuda", "MlxCpu"]`. That edit lives in `~/.exo/` on
+Jared's machines only — it is undocumented machine state, and the defect is
+unfixed.
+
+There is precedent in the codebase for the obvious fix. `ModelCard.fetch_from_hf`
+already defaults unknown models to every backend, with the rationale in a comment
+at `model_cards.py:259-261`:
+
+> all backends — we don't know what an arbitrary HF model supports; let placement
+> gate decide
+
+Giving `backends` a default of `list(Backend)` would apply that same intent to
+legacy cards. A migration that rewrites cards in place is the alternative.
+
+Per `RULES.md` — "if you see code that violates these rules, raise it with me
+rather than fixing" — this is raised, not fixed. It is out of scope for Plan 2
+either way: it predates this branch and affects every model, not just V4.
+
+## Status of the plan's Completion Gate
+
+Of the ten items, the six that are prompt- and parser-level are met by the
+committed goldens and the offline suites. These four are not yet evidenced:
+
+* *All 36 live API combinations pass on the validated two-rank JACCL instance* —
+  not evidenced; see above. Re-run with the new harness.
+* *Latest reminders preserve the append-only prefix invariant when reasoning is
+  retained* — asserted offline in `f5dbb050`; live evidence pending
+  `cached_tokens`.
+* *Arbitrary delimiter chunking never leaks markers or hangs* — proven offline
+  and by 6,288 partition cases, but never exercised live, because no tool call
+  fired.
+* *The dashboard uses the same healthy instance and does not expose DSML markup*
+  — not performed.
+
+## 2026-08-11 acceptance addendum
+
+The Phase 1 control-plane fix is now live-validated on the two Macs. After
+rebuilding `exo_rs` on both hosts, both APIs reported the same two-node
+topology with reciprocal direct TCP edges (`169.254.240.63` and
+`169.254.233.2`) and reciprocal JACCL edges (`rdma_en6` and `rdma_en3`). A
+`Tensor`/`MlxJaccl` instance reached `RunnerReady` on both ranks; the first
+successful instance was `f89529d7-386b-4f8b-8215-72384ff3a98a`. The resilient
+reachability and poll-loop fixes are commits `62b94c05` and `2289e119`.
+
+The provisional cold-first Phase 2 probe ran on a fresh instance
+(`4d80d5fe-be0b-4c0f-bd09-9761f45d07b5`) with `cached_tokens=0` and produced the
+one-token completion `' word'`. That evidence was later rejected as too weak
+to establish conditioning; the replacement nonce probe and current Task 5
+verdict are recorded below. The `use_prefix_cache=false` fix is `abceba63`; its
+focused regression passed 2/2 and the full runner unit directory passed 149/149
+on the real Metal host. Two identical live normal-chat requests after the fix
+both reported `cached_tokens=0`.
+
+The offline tool prompt probe is a hard Phase 3 blocker. With the actual
+user-only message shape, `scripts/probe_tool_call_prompt.py --self-test`
+fails because `get_current_weather` is absent from the rendered prompt. The
+pinned `deepseek_v32.render_message` implementation only renders the global
+`tools` argument for system/developer messages, not a user-only request. A
+live tool-call run was therefore not claimed: the model is not told that a
+tool exists. This remains a templating defect, not a parser verdict.
+
+The cold streamed throughput measurements were:
+
+| Requested prompt | Actual prompt | Cache | TTFT (s) | Prefill tok/s | Decode tok/s | Completion |
+|---:|---:|---:|---:|---:|---:|---:|
+| 512 | 546 | 0 | 2.2712 | 240.41 | 33.87 | 256 |
+| 16,384 | 16,419 | 0 | 69.4549 | 236.40 | 31.34 | 256 |
+| 32,768 | 32,804 | 0 | 168.5824 | 194.59 | 30.39 | 256 |
+
+The subsequent 65,536-token probe did not complete: the local node rebooted
+while the request was in progress and both APIs became unavailable. The
+preserved panic report classifies this event as a kernel watchdog panic after
+94 seconds without `watchdogd` check-ins; it does not show OOM or GPU-fault
+evidence. No further live test above 32K is permitted in this acceptance run.
+Revisit context management later, including leveraging OMLX TurboQuant to
+reduce long-prefill resource use before reconsidering 64K.
+
+## 2026-08-11 evidence correction
+
+### Task 5 cold-single verdict (superseded and failed)
+
+The earlier one-token completion `' word'` is not a valid conditioning verdict:
+the record did not establish a multi-token answer, and the branch that skipped
+Tasks 7 and 8 was therefore unsafe. The earlier
+`74c8eac4-d5e3-4297-8ff6-d6cdbb7d3e1a` attempt returned `'RO'` at an 8-token
+budget with `finish_reason=length`; it was also truncated.
+
+The replacement probe used fresh instance
+`08e66087-b50d-4b35-a19a-109299f1f405`, with this exact request:
+
+```text
+Return exactly this string and nothing else: WIRE-7F3C9A2D
+```
+
+The request set `max_tokens=256`, `temperature=0`, and
+`enable_thinking=false`. It reported `prompt_tokens_details.cached_tokens=0`,
+`finish_reason=length`, and `completion_tokens=256`. The complete assistant
+completion, quoted with the captured whitespace and escaping preserved, was:
+
+```text
+'\n\nWe need to solve the equation:\n\n\\[\n\\log_2(x+1) + \\log_2(x+3) = 3\n\\]\n\n**Step 1: Combine the logarithms**\n\nUsing the property \\(\\log_b A + \\log_b B = \\log_b(AB)\\):\n\n\\[\n\\log_2[(x+1)(x+3)] = 3\n\\]\n\n**Step 2: Convert to exponential form**\n\n\\[\n(x+1)(x+3) = 2^3\n\\]\n\n\\[\n(x+1)(x+3) = 8\n\\]\n\n**Step 3: Expand and solve the quadratic**\n\n\\[\nx^2 + 4x + 3 = 8\n\\]\n\n\\[\nx^2 + 4x - 5 = 0\n\\]\n\nFactor:\n\n\\[\n(x+5)(x-1) = 0\n\\]\n\nSo:\n\n\\[\nx = -5 \\quad \\text{or} \\quad x = 1\n\\]\n\n**Step 4: Check for domain restrictions**\n\nThe original logarithms require:\n\n\\[\nx+1 > 0 \\quad \\Rightarrow \\quad x > -1\n\\]\n\\[\nx+3 > 0 \\quad \\Rightarrow'
+```
+
+The nonce does not appear. This is a failed conditioning probe, not evidence
+that prefix caching caused the prior output; the prefix-cache fix remains
+regression-tested, but the Task 5 branch is unresolved and Tasks 7 and 8 were
+run independently below.
+
+### Full-suite gate
+
+The local `uv run` path could not open the sandboxed uv cache, and the local
+headless process cannot initialize Metal. The repository-local `tools/src`
+package resolved the former collection problem on the real Metal validation
+host. Running `PYTHONPATH=tools/src .venv/bin/pytest src -q` there produced:
+`734 passed, 3 skipped, 172 deselected in 27.85s`. The full-source gate is
+therefore met on the validation host; local headless MLX execution remains an
+environment limitation.
+
+### 64K failure classification
+
+The local node rebooted at approximately 00:19 SAST on 2026-08-11 and preserved
+`/Library/Logs/DiagnosticReports/panic-full-2026-08-11-002133.0002.panic`. Its
+panic string is `watchdog timeout: no checkins from watchdogd in 94 seconds`;
+the backtrace names `AppleARMWatchdogTimer`. The report does not show an OOM or
+GPU fault. Post-boot `memory_pressure` showed 96% free memory, zero swapins and
+zero swapouts; this is evidence for a kernel watchdog panic, not a confirmed
+RAM exhaustion event. The other node did not reboot. Reproducibility (“every
+time”) was not tested: the standing safety limit remains no live prompt above
+32K, so the operational record is **≤32K accepted, 64K hazardous, one confirmed
+watchdog panic**.
+
+The supported operational ceiling is a hard **32K prompt limit** for this
+acceptance record; no live prompt above 32K was attempted after the panic.
+Decision for Jared: consider enforcing an API prompt-length cap at 32K (or a
+slightly lower operational margin) so unbounded requests cannot reach this
+watchdog-shaped denial-of-service hazard. This follow-up does not implement
+that policy. Revisit longer-context management later, including OMLX TurboQuant
+support, before reconsidering 64K.
+
+### Topology root-cause qualification
+
+The Phase 1 tests prove that transport exceptions and poll-task exceptions are
+contained, but no live log captured `connect failed from`, `reachability probe
+failed`, or a poll exception for the original node-2 gap. Topology became
+symmetric after the native `exo_rs` libraries were rebuilt/reinstalled on both
+hosts and the checkouts/runtimes were reconciled. Therefore the Python
+resilience changes are defensible hardening and are deployed and
+regression-tested, but their causal role in the original missing edge is
+**not proven**; the triggering interface class is unknown. The prior
+“resilience fixes validated” wording should be read as deployment validation,
+not root-cause confirmation. The defect may recur.
+
+### Tool-call status and TurboQuant scope
+
+Tool calls remain **unvalidated live**. The offline user-only prompt render
+drops the tool schema, so live tool-call cases 5–7 were not run and have zero
+live evidence; no parser or endpoint verdict is claimed for them. OMLX
+TurboQuant is a context-state quantization/compression path that may reduce
+resource use during long prefills; it appeared as follow-up scope because the
+64K attempt reached a kernel-watchdog failure, but it has not been integrated
+or shown to prevent that failure.
+
+### 2026-08-11 independent Task 7 and Task 8 results
+
+Task 7 was run regardless of the invalid Task 5 branch with two local MLX
+processes and no two-node instance:
+
+| Layer regime | Attention | FFN | Full block | Verdict |
+|---|---:|---:|---:|---|
+| Layer 0 (no compressor) | PASS, `max_abs=0.03125` | PASS, `0.00195312` | PASS, `0.015625` | PASS |
+| Layer 2 (Indexer) | PASS, `0.03125` | PASS, `0.00390625` | PASS, `0.015625` | PASS |
+| Layer 3 (Compressor) | PASS, `0.03125` | PASS, `0.00195312` | **FAIL, `0.125`** | FAIL |
+
+All rank-agreement checks passed. Layer 3 therefore fails first at the full
+block while attention and FFN remain within the `0.05` tolerance; this
+implicates hyper-connection wrapping, not the Indexer, Compressor, head
+sharding, or expert sharding. Commands were:
+`mlx.launch -n 2 scripts/parity_sharded_vs_unsharded.py --layer {0,2,3}`.
+
+Task 8 added
+`src/exo/worker/tests/unittests/test_mlx/test_dsv4_prefill_mask.py` with the
+planned synthetic dimensions and `SEQ_LEN=7`. On real Metal it passed (`1
+passed`): the attention spy observed query length 7, not 28. This is unit
+coverage only and does not establish live tool-call behavior.
+
+### 2026-08-11 hyper-connection follow-up
+
+The ratio-pattern check did not generalize. With the original parity script,
+layer 4 (ratio 4) passed with full-block `max_abs=0.0234375`, and layer 5
+(ratio 128) also passed with full-block `max_abs=0.03125`. The evidence is
+therefore a layer-specific distributed numerical fragility, not a proven
+ratio-128 rule.
+
+The parity script now reports `hc_pre` and `hc_post` separately for both the
+attention and FFN paths, including input/output deltas and an amplification
+factor. On layer 3's default path:
+
+| Stage | Input delta | Output delta | Amplification |
+|---|---:|---:|---:|
+| `hc_attn_pre` | `0` | `0` | n/a |
+| attention | — | `0.03125` | — |
+| `hc_attn_post` | `0.03125` | `0.015625` | `0.5x` |
+| `hc_ffn_pre` | `0.015625` | `0.0234375` | `1.5x` |
+| FFN (chained path) | — | `0.121094` | — |
+| `hc_ffn_post` | `0.121094` | `0.125` | `1.03x` |
+
+The standalone FFN isolation still passes; the chained FFN result fails because
+it receives the already-diverged residual stream. This localizes the first
+observable mismatch to distributed attention, with subsequent hyper-connection
+and FFN stages preserving/amplifying it rather than creating an independent
+`hc_pre` mismatch.
+
+As a hypothesis test only, `--float32-hyper` forces the hyper-connection
+collapse/residual path through float32 in the parity harness. Layer 3 then
+reported isolated attention `max_abs=9.5e-7`, chained FFN `5.7e-7`, and
+full-block `max_abs=0.000487`, all PASS. `hc_ffn_post` still had a large
+relative amplification factor (`859x`) because its input delta was already
+sub-micro; the absolute output remained inside tolerance. This is strong
+evidence of numerical fragility exposed by distributed execution, but it is
+not yet a production fix: the experiment changes the dtype seen by the
+downstream attention/FFN path and needs a separately scoped implementation and
+regression plan.
+
+The requested full-block deltas across the measured layers are:
+
+| Layer | Configuration | Full-block `max_abs` |
+|---:|---|---:|
+| 0 | no compressor | `0.015625` |
+| 2 | ratio 4 / Indexer | `0.015625` |
+| 3 | ratio 128 / Compressor | `0.125` |
+| 4 | ratio 4 | `0.0234375` |
+| 5 | ratio 128 | `0.03125` |
+
+The layer-3 chain is one amplification sequence, not three independent
+defects: attention seeds a `0.03125` delta, the chained FFN reaches `0.121094`,
+and the block ends at `0.125`. The isolated FFN remains at `0.00195312`, so it
+does not independently diverge. A follow-up `--float32-sinkhorn` experiment
+used the separate float32 Sinkhorn normalization path but cast the collapse
+back to bfloat16. It did not change the layer-3 result: chained FFN
+`0.121094`, `hc_ffn_post` `0.125`, and full block `0.125`. The `0.000487`
+result therefore requires a wider float32 path than Sinkhorn normalization
+alone; no production cast has been enabled and no live nonce probe was run
+with an unvalidated fix.
