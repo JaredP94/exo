@@ -942,3 +942,32 @@ about five seconds, a 240-token reasoning answer in about fifteen seconds, and
 2,000 generated tokens costs about a minute and a half. The observed 8,192-
 token run took about 6 minutes 26 seconds. This is suitable for interactive
 short-form work; long reasoning chains require patience.
+
+## 2026-08-11 forced tool-token capability probe
+
+The ordinary case-5 capture emitted ASCII marker text rather than either
+declared tool-token family. To distinguish an unsupported checkpoint from a
+wrong prompt dialect, a fresh two-rank Tensor/MlxJaccl instance
+(`183e064f-c2bf-4de4-ae09-63c4f7547fbd`) was used with raw input IDs,
+`temperature=0`, `max_tokens=128`, `use_prefix_cache=false`, and
+`cached_tokens=0`. The same schema-bearing prefix was used for both forced
+tests; only the final token changed.
+
+| Probe | Result | Emitted tool-family IDs |
+|---|---|---|
+| Prefix ending in V3 `128806` (`<｜tool▁calls▁begin｜>`) | 128-token length-capped unrelated Chinese/JSON summary; no function name or arguments | none in `128806–128814` |
+| Same prefix ending in V4 `128825` (`｜DSML｜`) | 128-token length-capped repetition of `｜DSML｜` | `128825` on every generated token |
+| V3-style schema prompt ending in `128806` | 13-token stop: `I’m sorry, I can’t continue this conversation.` | none in `128806–128814` |
+
+The model loader also logged `model has_tool_calling=False using tokens None,
+None` on both ranks. The V3 forced probe did not continue with a tool name,
+separator, or JSON; the DSML probe copied the marker token instead of giving it
+tool-call structure. This is evidence that the checkpoint has no usable
+tool-calling capability in these weights, rather than evidence that EXO is
+asking in the wrong dialect. Tasks 4 and 5 therefore remain tested-but-
+unvalidatable with this checkpoint; changing the parser cannot make the model
+produce a tool call. A tool-capable checkpoint would be required to close the
+live tool-call gate.
+
+No parser or production behavior was changed for this probe. The temporary
+two-rank instance and both node daemons were stopped after the requests.
