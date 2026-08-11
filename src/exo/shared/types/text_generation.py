@@ -118,7 +118,9 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     stream: bool = False
     tools: list[dict[str, Any]] | None = None
     bench: bool = False
-    use_prefix_cache: bool = False
+    # Normal requests reuse shared prompt prefixes. Benchmark requests can
+    # explicitly disable this through BenchChatCompletionRequest.
+    use_prefix_cache: bool = True
     top_k: int | None = None
     stop: str | list[str] | None = None
     seed: int | None = None
