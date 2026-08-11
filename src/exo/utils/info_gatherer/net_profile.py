@@ -114,6 +114,10 @@ async def check_reachable(
                 await check_reachability(
                     target_ip, expected_node_id, out, client, api_port
                 )
+            except (TypeError, AttributeError):
+                # These indicate a programming or contract error, not a
+                # transient peer failure. Let the task group surface them.
+                raise
             except Exception:
                 # Each advertised interface is an independent probe.  Keep a
                 # malformed or failing peer from cancelling the task group so
