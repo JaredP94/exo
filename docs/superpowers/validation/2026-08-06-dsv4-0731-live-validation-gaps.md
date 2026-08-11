@@ -737,7 +737,7 @@ raw-token requests with greedy decoding, `max_tokens=16`,
 cache-cold evidence on one loaded instance, not six process restarts. The
 checkpoint tokenizer supplied the token pieces shown below.
 
-| Step | Raw IDs | First ten generated token pieces | Completion / metadata |
+| Step | Raw IDs | First ten token-text pieces (checkpoint-tokenizer re-encoding) | Completion / metadata |
 |---:|---|---|---|
 | 1 control | `[671, 6102, 294, 8760, 344]` | `Paris`, `.`, ` The`, ` capital`, ` of`, ` Spain`, ` is`, ` Madrid`, `.`, ` The` | `Paris. The capital of Spain is Madrid. The capital of Italy is Rome.\`; 16 tokens, `finish_reason=length` |
 | 2 BOS | `[0, 671, 6102, 294, 8760, 344]` | `Paris`, `.`, ` It`, ` is`, ` located`, ` in`, ` the`, ` north`, `-central`, ` part` | `Paris. It is located in the north-central part of the country, on the`; 16 tokens, `finish_reason=length` |
