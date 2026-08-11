@@ -4,6 +4,7 @@ import copy
 import functools
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, NotRequired, TypedDict, cast, get_args
 
 import pytest
@@ -119,14 +120,56 @@ def test_raw_input_ids_bypass_chat_encoding(monkeypatch: pytest.MonkeyPatch) -> 
     assert prompt == ""
 
 
-def test_encode_prompt_accepts_raw_input_ids_without_tokenizer() -> None:
+def _raw_tokenizer(vocab_size: int = 129280) -> TokenizerWrapper:
+    return cast(
+        TokenizerWrapper,
+        cast(object, SimpleNamespace(vocab_size=vocab_size)),
+    )
+
+
+def test_encode_prompt_requires_raw_input_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXO_ENABLE_RAW_INPUT_IDS_DEBUG", raising=False)
+
+    with pytest.raises(ValueError, match="EXO_ENABLE_RAW_INPUT_IDS_DEBUG=1"):
+        encode_prompt(
+            _raw_tokenizer(),
+            "ignored by raw input IDs",
+            raw_input_ids=[0, 128803, 128821],
+        )
+
+
+def test_encode_prompt_accepts_raw_input_ids_with_debug_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXO_ENABLE_RAW_INPUT_IDS_DEBUG", "1")
     tokens = encode_prompt(
-        cast(TokenizerWrapper, object()),
+        _raw_tokenizer(),
         "ignored by raw input IDs",
         raw_input_ids=[0, 128803, 128821],
     )
 
     assert tokens.tolist() == [0, 128803, 128821]
+
+
+@pytest.mark.parametrize("token_id", [-1, 129280])
+def test_encode_prompt_rejects_raw_token_ids_outside_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, token_id: int
+) -> None:
+    monkeypatch.setenv("EXO_ENABLE_RAW_INPUT_IDS_DEBUG", "1")
+
+    with pytest.raises(ValueError, match="outside tokenizer vocabulary"):
+        encode_prompt(_raw_tokenizer(), "ignored", raw_input_ids=[token_id])
+
+
+def test_encode_prompt_rejects_raw_input_ids_over_supported_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXO_ENABLE_RAW_INPUT_IDS_DEBUG", "1")
+
+    with pytest.raises(ValueError, match="maximum supported length"):
+        encode_prompt(_raw_tokenizer(), "ignored", raw_input_ids=[0] * 32769)
 
 
 def test_reminder_relocation_keeps_leading_system_and_does_not_mutate() -> None:
