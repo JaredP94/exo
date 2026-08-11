@@ -119,6 +119,7 @@ def test_ordinary_model_preserves_lazy_strict_and_default_dispatch(
     import exo.worker.engines.mlx.deepseek_v4_0731_loader as loader
 
     _write_checkpoint(tmp_path, {"model_type": "llama"}, [])
+
     class CompatibleModel(nn.Module):
         pass
 
@@ -126,7 +127,9 @@ def test_ordinary_model_preserves_lazy_strict_and_default_dispatch(
     returned_config = {"model_type": "llama"}
     captured: dict[str, object] = {}
 
-    def fake_load_model(*args: object, **kwargs: object) -> tuple[object, dict[str, Any]]:
+    def fake_load_model(
+        *args: object, **kwargs: object
+    ) -> tuple[object, dict[str, Any]]:
         captured["args"] = args
         captured["kwargs"] = kwargs
         return model, returned_config
@@ -218,7 +221,9 @@ def test_0731_checkpoint_forces_strict_and_supplies_compatibility_classes(
         pass
 
     monkeypatch.setattr(loader, "_mlx_load_model", fake_load_model)
-    monkeypatch.setattr(loader, "install_deepseek_v4_0731_prefill_attention", skip_prefill)
+    monkeypatch.setattr(
+        loader, "install_deepseek_v4_0731_prefill_attention", skip_prefill
+    )
     monkeypatch.setattr(loader, "audit_deepseek_v4_0731_quantization", skip_audit)
     monkeypatch.setattr(loader, "DeepseekV40731Model", CompatibleModel)
 
@@ -238,8 +243,7 @@ def test_0731_checkpoint_forces_strict_and_supplies_compatibility_classes(
         "model.layers.0.ffn.switch_mlp.down_proj",
     )
     assert all(
-        path not in model_config_at_load["quantization"]
-        for path in switch_projections
+        path not in model_config_at_load["quantization"] for path in switch_projections
     )
     assert all(path in normalized["quantization"] for path in switch_projections)
 
@@ -263,7 +267,9 @@ def test_malformed_0731_evidence_fails_before_mlx_loader(
 
     monkeypatch.setattr(loader, "_mlx_load_model", fake_load_model)
 
-    with pytest.raises(DeepseekV40731CompatibilityError, match="dspark_target_layer_ids"):
+    with pytest.raises(
+        DeepseekV40731CompatibilityError, match="dspark_target_layer_ids"
+    ):
         loader.load_exo_model(tmp_path)
 
     assert not called
@@ -275,6 +281,7 @@ def test_0731_loader_reports_backbone_only_status(
     import exo.worker.engines.mlx.deepseek_v4_0731_loader as loader
 
     _supported_checkpoint(tmp_path)
+
     class CompatibleModel(nn.Module):
         pass
 
@@ -290,7 +297,9 @@ def test_0731_loader_reports_backbone_only_status(
         pass
 
     monkeypatch.setattr(loader, "_mlx_load_model", fake_load_model)
-    monkeypatch.setattr(loader, "install_deepseek_v4_0731_prefill_attention", skip_prefill)
+    monkeypatch.setattr(
+        loader, "install_deepseek_v4_0731_prefill_attention", skip_prefill
+    )
     monkeypatch.setattr(loader, "audit_deepseek_v4_0731_quantization", skip_audit)
     monkeypatch.setattr(loader, "DeepseekV40731Model", CompatibleModel)
     messages: list[str] = []
@@ -456,6 +465,7 @@ def test_single_node_load_routes_through_compatibility_wrapper(
 
     metadata = _tensor_metadata()
     calls: list[tuple[Path, bool, bool]] = []
+
     def ignore_wired_limit(_: object) -> None:
         pass
 
@@ -535,8 +545,12 @@ def test_distributed_geometry_failure_precedes_tensor_sharding(
         "load_exo_model",
         fake_load_model,
     )
-    monkeypatch.setattr(utils_mlx, "inspect_deepseek_v4_0731_checkpoint", fake_checkpoint)
-    monkeypatch.setattr(utils_mlx, "normalized_quantization_specs", empty_quantization_specs)
+    monkeypatch.setattr(
+        utils_mlx, "inspect_deepseek_v4_0731_checkpoint", fake_checkpoint
+    )
+    monkeypatch.setattr(
+        utils_mlx, "normalized_quantization_specs", empty_quantization_specs
+    )
 
     def geometry_failure(*_: object) -> None:
         raise DeepseekV40731CompatibilityError("heads_per_group=8")
@@ -546,7 +560,9 @@ def test_distributed_geometry_failure_precedes_tensor_sharding(
         tensor_sharding_started = True
         return iter(())
 
-    monkeypatch.setattr(utils_mlx, "validate_deepseek_v4_0731_shard_geometry", geometry_failure)
+    monkeypatch.setattr(
+        utils_mlx, "validate_deepseek_v4_0731_shard_geometry", geometry_failure
+    )
     monkeypatch.setattr(utils_mlx, "tensor_auto_parallel", tensor_sharding)
 
     generator = utils_mlx.shard_and_load(metadata, group)
