@@ -61,6 +61,14 @@ commit body, in each `VERIFICATION OUTSTANDING` note in
 Step 1 below before writing any new code. If it fails, stop and report; do not
 patch forward on top of a suspect commit.
 
+**Provisioning is part of the quality gate.** A bare `uv sync` installs the
+minimal root environment and can produce several hundred spurious
+basedpyright errors from unresolved optional MLX and PIL imports. Sync with
+the named `mlx` extra and verify the load-bearing versions before running the
+gate. The MLX wheel must be copied byte-for-byte from the validated dev
+environment rather than freshly resolved: the float32 SDPA workaround depends
+on MLX `0.32.0.dev20260804+cc3f3e60` and `mlx_lm` `0.31.3`.
+
 ## 1. Discharge the outstanding verification (do this first)
 
 ```bash
