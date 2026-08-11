@@ -699,6 +699,9 @@ Return exactly this string and nothing else: WIRE-PROMPT-AUDIT-20260811
 The fourth arrangement was an opt-in diagnostic only; the default encoder is
 unchanged. The A/B therefore does not identify a working chat arrangement, and
 it does not support a claim that the model is ignoring the prompt wholesale.
+That conclusion is limited to the nonce exact-echo instruction: the later
+factual raw-token bisect shows that the same complete chat arrangement can
+produce a correct, terminating answer.
 
 ### Raw-token control
 
@@ -725,9 +728,10 @@ Paris. The capital of France is Paris
 This is the decisive localization in the current record: the checkpoint,
 tokenizer IDs, distributed model, collectives, and decode path can produce the
 correct factual continuation when the chat encoder is bypassed. The remaining
-defect is prompt construction or the model's response to the constructed V4
-arrangement; the numerical-routing work remains characterization and is not
-the demonstrated cause of the live instruction-following failure.
+question is therefore whether the model handles particular prompt content and
+task types reliably; this result does not establish a broken chat encoder. The
+numerical-routing work remains characterization and is not the demonstrated
+cause of the live instruction-following failure.
 
 ### Raw-token scaffolding bisect
 
@@ -761,3 +765,61 @@ authoritative template. The raw five-token continuation also retires the
 numerical-drift causal hypothesis for this symptom: depth-43 sharded-versus-
 unsharded divergence remains a real characterization, but it did not prevent
 the deployed sharded path from producing a conditioned factual continuation.
+
+## 2026-08-11 corrected probe interpretation and content discriminator
+
+The earlier factual API probe was misdesigned and misinterpreted. It used
+`max_tokens=1` and treated top-1 ` Paris` as the pass condition. A chat-formatted
+response correctly begins with `The`, not ` Paris`, so the observed top-1 `The`
+was not evidence of failure. The nine-token response from the raw bisect,
+`The capital of France is **Paris**.`, is the corrected factual verdict and
+terminates normally.
+
+The exact arrangement that produced that factual answer was then held fixed
+through `raw_input_ids`, while the content was changed to an exact-echo nonce
+instruction. The prompt content was:
+
+~~~
+Return only this exact string: WIRE-PROMPT-AUDIT-20260811
+~~~
+
+The raw IDs were:
+
+~~~
+[0, 128803, 25529, 1353, 566, 6319, 3418, 28, 448, 34549, 6351,
+ 3674, 6806, 54, 6526, 12876, 2992, 15, 939, 24877, 779,
+ 128804, 128821, 128822]
+~~~
+
+With `max_tokens=64`, greedy decoding, `use_prefix_cache=false`, and
+`cached_tokens=0`, the completion was:
+
+~~~
+We need to return only the exact string "WIRE-PROMPT-AUDIT-20260811". The user said "Return only this exact string: WIRE-PROMPT-AUDIT-20260811". So we just output that string. No extra text.</think>WIRE-PROMP
+~~~
+
+It included the nonce in the model's explanation but did not complete the
+exact-echo task before the 64-token limit. Because the same raw chat scaffolding
+answers the factual task correctly, this is evidence against the encoder,
+tokenizer, distributed stack, and numerical-routing work as the cause of the
+nonce behavior. The remaining observation is model/task-content behavior.
+
+### Normal chat instruction battery
+
+Four ordinary requests were sent through the normal chat API on the same
+two-rank instance, with `enable_thinking=false`, greedy decoding,
+`max_tokens=128`, `use_prefix_cache=false`, and `cached_tokens=0` each time:
+
+| Request | Completion | Verdict |
+|---|---|---|
+| `What is 2+2?` | `2+2 equals 4.`; 8 tokens, stop | Pass |
+| `List three primary colours.` | `1. Red\n2. Blue\n3. Yellow`; 12 tokens, stop | Pass |
+| `Write a haiku about rain.` | 128-token planning/meta-analysis response, finish length | Fails to produce the requested poem within budget |
+| `Summarise this in one sentence: The server received the request. The worker returned the response.` | `The server received the request, and the worker returned the response.`; 14 tokens, stop | Pass |
+
+The evidence now supports a narrower conclusion: the two-rank distributed path
+and chat arrangement produce correct factual and ordinary instructional output,
+while this checkpoint is unreliable on exact-echo/random-string instructions
+and at least some creative-writing requests. The validation record must not
+call that an inference-stack failure. Tool calls remain unvalidated live, and
+the 32K ceiling/64K watchdog hazard remain unchanged.
