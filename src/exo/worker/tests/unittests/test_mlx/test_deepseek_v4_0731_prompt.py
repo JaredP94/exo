@@ -307,8 +307,7 @@ def test_v4_no_think_prompt_variant_omits_thinking_markers(
     )
 
     assert prompt == (
-        "<｜begin▁of▁sentence｜><｜User｜>The capital of France is"
-        "<｜Assistant｜>"
+        "<｜begin▁of▁sentence｜><｜User｜>The capital of France is<｜Assistant｜>"
     )
 
 
