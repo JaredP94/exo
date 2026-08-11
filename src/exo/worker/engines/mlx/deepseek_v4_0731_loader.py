@@ -40,7 +40,9 @@ def _mlx_loader_config(config: dict[str, Any]) -> dict[str, Any]:
     loader_config = copy.deepcopy(config)
     quantization_value = cast(object, loader_config["quantization"])
     if not isinstance(quantization_value, dict):
-        raise DeepseekV40731CompatibilityError("normalized quantization must be a mapping")
+        raise DeepseekV40731CompatibilityError(
+            "normalized quantization must be a mapping"
+        )
     quantization: dict[str, object] = {}
     for path, spec in cast(dict[object, object], quantization_value).items():
         if not isinstance(path, str):
@@ -167,6 +169,4 @@ def _is_module(value: object) -> bool:
 
 
 def _format_spec(spec: QuantizationSpec) -> str:
-    return (
-        f"(bits={spec.bits}, group_size={spec.group_size}, mode={spec.mode!r})"
-    )
+    return f"(bits={spec.bits}, group_size={spec.group_size}, mode={spec.mode!r})"
