@@ -119,7 +119,9 @@ def inspect_deepseek_v4_0731_checkpoint(
         if field in raw_config
     }
     valid_dspark_block_size = _is_positive_int(raw_config.get("dspark_block_size"))
-    valid_dspark_targets = _is_nonempty_integer_list(raw_config.get("dspark_target_layer_ids"))
+    valid_dspark_targets = _is_nonempty_integer_list(
+        raw_config.get("dspark_target_layer_ids")
+    )
     if dspark_fields_present and not (valid_dspark_block_size and valid_dspark_targets):
         offending_fields = _malformed_dspark_fields(
             raw_config,
@@ -160,7 +162,9 @@ def inspect_deepseek_v4_0731_checkpoint(
             "dspark_block_size, dspark_target_layer_ids"
         )
 
-    normalized_config, realized_quantization = normalize_deepseek_v4_0731_config(raw_config)
+    normalized_config, realized_quantization = normalize_deepseek_v4_0731_config(
+        raw_config
+    )
     quantization_value = raw_config.get("quantization", {})
     quantization = _require_string_key_mapping(
         quantization_value,
@@ -209,7 +213,11 @@ def validate_deepseek_v4_0731_shard_geometry(
         if path.startswith("mtp."):
             continue
         logical_input_width = next(
-            (width for suffix, width in widths_by_suffix.items() if path.endswith(suffix)),
+            (
+                width
+                for suffix, width in widths_by_suffix.items()
+                if path.endswith(suffix)
+            ),
             None,
         )
         if logical_input_width is None:
@@ -233,7 +241,9 @@ def _validate_compress_ratios(config: Mapping[str, Any]) -> None:
             "compress_ratios must cover every hidden layer"
         )
     if any(
-        not isinstance(ratio, int) or isinstance(ratio, bool) or ratio not in {0, 4, 128}
+        not isinstance(ratio, int)
+        or isinstance(ratio, bool)
+        or ratio not in {0, 4, 128}
         for ratio in ratios
     ):
         raise DeepseekV40731CompatibilityError(
@@ -321,12 +331,9 @@ def _is_nonempty_integer_list(value: object) -> bool:
     if not isinstance(value, list):
         return False
     layer_ids = cast(list[object], value)
-    return (
-        bool(layer_ids)
-        and all(
-            isinstance(layer_id, int) and not isinstance(layer_id, bool)
-            for layer_id in layer_ids
-        )
+    return bool(layer_ids) and all(
+        isinstance(layer_id, int) and not isinstance(layer_id, bool)
+        for layer_id in layer_ids
     )
 
 
@@ -346,6 +353,8 @@ def _require_string_key_mapping(value: object, description: str) -> dict[str, ob
     result: dict[str, object] = {}
     for key, item in mapping.items():
         if not isinstance(key, str):
-            raise DeepseekV40731CompatibilityError(f"{description} keys must be strings")
+            raise DeepseekV40731CompatibilityError(
+                f"{description} keys must be strings"
+            )
         result[key] = item
     return result
