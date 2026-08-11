@@ -880,3 +880,65 @@ short answer. The distributed path, sharding, collectives, JACCL transport,
 tokenizer, chat arrangement, and decode are validated for ordinary terminating
 answers; live tool-call semantics remain open due to the separate marker/parser
 problem above.
+
+## 2026-08-11 tool schema and token-format audit
+
+The suspected missing-schema explanation was checked against the current V4
+path. Rendering case 5 with the `get_weather` function produces a 1,217-character
+prompt containing the `get_weather` name, its JSON parameter schema, the
+`Available Tool Schemas` section, and the V4 DSML invocation instructions.
+The V4 adapter inserts the tool definitions into the rendered system content,
+so the current live failure is not explained by a user-only rendering that
+drops the schema.
+
+The checkpoint tokenizer declares both tool-format families. Its V3-style
+special-token IDs are:
+
+~~~
+128806 <｜tool▁calls▁begin｜>   128807 <｜tool▁calls▁end｜>
+128808 <｜tool▁call▁begin｜>    128809 <｜tool▁call▁end｜>
+128810 <｜tool▁outputs▁begin｜> 128811 <｜tool▁outputs▁end｜>
+128812 <｜tool▁output▁begin｜>  128813 <｜tool▁output▁end｜>
+128814 <｜tool▁sep｜>
+~~~
+
+It also declares the V4 DSML marker `｜DSML｜` at ID 128825 (and DSML
+markup tokens at 128840 and 128841). Therefore the vocabulary does not by
+itself establish which tool protocol this checkpoint expects; both families
+are present.
+
+The live two-rank case-5 audit used `EXO_DEBUG_TOKEN_IDS=1`, greedy decoding,
+`max_tokens=8192`, `use_prefix_cache=false`, and `cached_tokens=0`. The request
+contained the complete rendered schema. The result was `finish_reason=stop`,
+`completion_tokens=40`, `reasoning_tokens=21`, no `tool_calls`, and content:
+
+~~~
+I'll check the current weather in Paris for you.
+
+<|tool_|>
+~~~
+
+The selected token IDs were:
+
+~~~
+671, 3967, 344, 13070, 943, 270, 9670, 295, 11111, 16,
+342, 588, 1347, 270, 1178, 65, 50219, 2019, 362, 566, 16,
+43, 5922, 4085, 270, 2573, 9670, 295, 11111, 362, 440, 339,
+30, 94, 72461, 65, 94, 32, 1
+~~~
+
+The final sequence is ASCII `<|tool_|>` (`<`/30, `|`/94,
+`tool`/72461, `_`/65, `|`/94, `>`/32, EOS/1), not a declared V3 special
+token sequence and not a V4 DSML block. The API token-ID field used for this
+audit is diagnostic-only and is populated only when `EXO_DEBUG_TOKEN_IDS=1`;
+the parser and production behavior were not changed. This leaves tool calls
+unvalidated live. The choice between the checkpoint's V3 family and EXO's V4
+DSML path is a format/design question for Jared, not a parser change to make
+in this branch.
+
+The measured throughput is an approximate usability envelope: `2.92 s` TTFT
+and `21.37 tok/s` decode means a short factual answer typically arrives in
+about five seconds, a 240-token reasoning answer in about fifteen seconds, and
+2,000 generated tokens costs about a minute and a half. The observed 8,192-
+token run took about 6 minutes 26 seconds. This is suitable for interactive
+short-form work; long reasoning chains require patience.
