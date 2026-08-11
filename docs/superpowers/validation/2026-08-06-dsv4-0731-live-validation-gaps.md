@@ -728,3 +728,36 @@ correct factual continuation when the chat encoder is bypassed. The remaining
 defect is prompt construction or the model's response to the constructed V4
 arrangement; the numerical-routing work remains characterization and is not
 the demonstrated cause of the live instruction-following failure.
+
+### Raw-token scaffolding bisect
+
+To localize the transition, the same two-rank instance received six sequential
+raw-token requests with greedy decoding, `max_tokens=16`,
+`use_prefix_cache=false`, and `cached_tokens=0` for every request. This is
+cache-cold evidence on one loaded instance, not six process restarts. The
+checkpoint tokenizer supplied the token pieces shown below.
+
+| Step | Raw IDs | First ten generated token pieces | Completion / metadata |
+|---:|---|---|---|
+| 1 control | `[671, 6102, 294, 8760, 344]` | `Paris`, `.`, ` The`, ` capital`, ` of`, ` Spain`, ` is`, ` Madrid`, `.`, ` The` | `Paris. The capital of Spain is Madrid. The capital of Italy is Rome.\`; 16 tokens, `finish_reason=length` |
+| 2 BOS | `[0, 671, 6102, 294, 8760, 344]` | `Paris`, `.`, ` It`, ` is`, ` located`, ` in`, ` the`, ` north`, `-central`, ` part` | `Paris. It is located in the north-central part of the country, on the`; 16 tokens, `finish_reason=length` |
+| 3 User | `[0, 128803, 671, 6102, 294, 8760, 344]` | `Paris`, `.`, ` The`, ` capital`, ` of`, ` Germany`, ` is`, ` Berlin`, `.`, ` The` | `Paris. The capital of Germany is Berlin. The capital of Italy is Rome.`; 16 tokens, `finish_reason=length` |
+| 4 Assistant | `[0, 128803, 671, 6102, 294, 8760, 344, 128804]` | `The`, ` capital`, ` of`, ` France`, ` is`, ` **`, `Paris`, `**.` | `The capital of France is **Paris**.`; 9 tokens, `finish_reason=stop` |
+| 5 open think | `[0, 128803, 671, 6102, 294, 8760, 344, 128804, 128821]` | `1`, `.`, ` `, ` **`, `Analy`, `ze`, ` the`, ` Request`, `**`, `:` | `1.  **Analyze the Request**:\n    *   The user's`; 16 tokens, `finish_reason=length` |
+| 6 closed think | `[0, 128803, 671, 6102, 294, 8760, 344, 128804, 128821, 128822]` | `The`, ` capital`, ` of`, ` France`, ` is`, ` **`, `Paris`, `**.` | `The capital of France is **Paris**.`; 9 tokens, `finish_reason=stop` |
+
+The first transition is the addition of `<｜Assistant｜>`: BOS alone and
+`<｜User｜>` still produce document-style continuation, while the Assistant
+marker produces a direct answer. Opening `<think>` deliberately changes the
+mode to analysis, and appending `</think>` returns to the direct answer. Thus
+the live evidence does not support the earlier claim that the complete
+`<｜Assistant｜><think></think>` arrangement is intrinsically broken. It does
+show that the role boundary is load-bearing, and that the no-role raw control
+and the fully closed chat form are materially different prompt modes.
+
+This bisect is stronger than conformance to the pinned third-party V4 fork:
+the fork is a useful implementation reference, not a checkpoint-declared
+authoritative template. The raw five-token continuation also retires the
+numerical-drift causal hypothesis for this symptom: depth-43 sharded-versus-
+unsharded divergence remains a real characterization, but it did not prevent
+the deployed sharded path from producing a conditioned factual continuation.
