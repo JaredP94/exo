@@ -6,7 +6,22 @@
 
 **Target checkpoint:** `Jundot/DeepSeek-V4-Flash-0731-oQ4e-mtp` (confirmed)
 
-**Working revisions:** EXO `a6cd2fce`; OMLX `50846648`
+**Working revisions:** EXO `a6cd2fce`; OMLX `2450a53c`
+
+**Reference reconciliation:** `50846648..2450a53c` (51 commits), triaged in
+`2026-08-11-omlx-upstream-reconciliation-design.md`. `chat_template_v4.py` and
+`tool_parser_v4.py` are byte-identical across the range, so the prompt protocol
+and the DSML reference parser are unaffected.
+
+The 16 committed goldens in
+`src/exo/worker/tests/fixtures/deepseek_v4_0731_prompt_goldens.json` still record
+`omlx_git_sha: 50846648…` and are deliberately **not** regenerated.
+`generate_dsv4_0731_prompt_goldens.py:239-241` loads exactly one file from the
+OMLX tree — `chat_template_v4.py` — which is byte-identical across the range, so
+regeneration can change nothing but the recorded sha (written at `:324`). Keep
+the local `omlx` working tree at `50846648`: checking it out at `2450a53c` and
+regenerating would rewrite all 16 goldens in that single metadata field and
+nothing else.
 
 **Checkpoint inspected:** yes — see [Appendix A](#appendix-a-checkpoint-facts-verified). All layout and quantization claims below are measured, not inferred.
 
@@ -581,3 +596,91 @@ PY
 11. Added the DSpark discriminator (`dspark_block_size` plus `dspark_target_layer_ids`, explicitly not `num_nextn_predict_layers`), `compress_ratios` validation, the `tid2eid` dtype note, and the observation that `from_dict` silently discards `dspark_*`.
 12. Documented that the model card requires no change, correcting an open question about tool-capability gating.
 13. Added memory expectations, and noted the understated wired limit and unsharded KV cache.
+
+## Appendix B — OMLX reconciliation 50846648..2450a53c
+
+The 51 commits in `50846648..2450a53c` partition as follows: Group I — 5;
+Group II — 2; Group III — 3; Group IV — 7; Group V — 34; Group VI — the
+provable non-change. The counted groups total **51 commits**.
+
+### Group I — Integrate (5 commits, 3 work items)
+
+| Commits | Item | Mechanism |
+|---|---|---|
+| `745d9c22`, `4dc9baab`, `8a00cfbf` | Prefill memory estimation and reclaim accounting | EXO-native reimplementation. OMLX's scheduler is not EXO's, so the idea transfers and the code does not. |
+| `4c6b5931` | Skip indexer scoring when `pooled_len <= index_topk` | Runtime install over the fork |
+| `b128b232` (cache portion only) | Pooled buffer append-in-place rather than per-step `concatenate` | Runtime install over the fork |
+
+Evidence for the two fork-level items, verified against `6a3df6c`:
+
+- `Indexer.__call__` (`mlx_lm/models/deepseek_v4.py:1799`) computes
+  `k = min(self.index_topk, idx_kv.shape[1])` and always runs the scoring einsum
+  and `argpartition`, including when `pooled_len <= index_topk`, where the
+  selection is the identity set. With `index_topk = 512`, that condition holds
+  for ratio-128 layers across the whole supported context range.
+- `_CompressorBranch` (`:1182`) grows the pooled buffer with
+  `mx.concatenate([pool, new_pooled], axis=1)` on every update — the quadratic
+  pattern upstream replaced with geometric append-in-place. This is a candidate
+  explanation for 163.792 s on a 32,819-token cold prefill.
+
+The kernel half of `b128b232` (wsdpa fusion, `custom_kernels/glm_moe_dsa/csrc`)
+is not portable; the fork has its own fused kernels for the same operations.
+
+### Group II — Verify, then decide (2 commits)
+
+| Commit | Question to settle |
+|---|---|
+| `b6811ed6` | Upstream's `_native_ratio128_attention_enabled` now **disables** the native ratio-128 sparse-attention path for sub-4-bit V4 quantization. Does that rule bite on `oQ4e`'s realized per-module quantization, and are the fork's equivalent fast paths reachable under this recipe at all? |
+| `c48e1a82` | Upstream split one conflated block-config threshold into separate mxfp4 (`16384`) and affine (`8192`) crossovers. Does the fork's `switch_layers.py` conflate them the same way? This is a tuning-correctness defect, not a tuning number. |
+
+Both are investigations. Per `RULES.md`, a hazard found here is **raised, not
+fixed**.
+
+### Group III — Phase-two inputs, recorded not integrated (3 commits)
+
+`5d77302b` and `f3267488` implement MTPLX side-car import for `qwen3-next-mtp`
+packaging, which does not describe `DeepSeek-V4-Flash-0731-oQ4e-mtp` — that
+checkpoint carries its MTP tensors in-index under `mtp.*`. Two things transfer
+regardless:
+
+- **`mlx_lm`'s weight glob is `model*.safetensors`.** A `mtp.safetensors`
+  side-car is never opened even when the index points at it. `f3267488` exists
+  because `5d77302b` shipped exactly that mistake: detection flipped true while
+  the text path could not bind the head.
+- The fail-closed pattern — validate the contract and audit the payload before
+  any mutation, write config and index atomically with timestamped backups.
+
+`7fe62f9c` (admit late joins during singleton MTP decode via drain handoff) is
+late-join semantics for the phase-two decode loop.
+
+### Group IV — Reference-only, structurally different (7 commits)
+
+`cbd7daa4`, `7efcc629` (per-member `CacheList` block storage — EXO has its own
+cache-copy design in `engines/mlx/cache.py`), `cfec5021` (OMLX scheduler cache
+block sizing), `267d5436`, `ded2bbe4` (GDN sidecars — not a V4 layer type),
+`2c10f0fb` (grammar sampling), `2fcf8894` (kernel cleanup for `b128b232`).
+
+### Group V — Not applicable (34 commits)
+
+Ling 3.0 / bailing_hybrid ×5 (`c6244635`, `d4adcc35`, `97fdbad3`, `fe3101e3`,
+`b75e1aa0`); Muse Glimmer VLM ×4 (`6ee393d4`, `39bb1784`, `9a57d63d`, and
+`e1acb0bc`'s VLM MTP thinking budget); Jina reranker ×3 (`876e1797`, `03a3120e`,
+`7b755b90`); Inkling ×2 (`5215d9b4`, `5306b733`); generic XML tool-calling ×3
+(`cdeea4c5`, `12937527`, `d5592aa0`); `13997cec` gemma4; `a714035f` Hermes;
+admin and engine ×4 (`198c5ce9`, `fe79b272`, `c10c5c5b`, `9b59e122`); i18n and
+mac-app ×3 (`76e13909`, `9aacf8d9`, `90277828`); `128615b7` codex CLI;
+`d2575b1d` deps; version bumps ×3 (`49ec2716`, `ab95612a`, `350dc08b`);
+`2450a53c` web search; `24e0d2b1` test stub; `95c38c13` VLM sampler typing.
+
+The three `fix(tool-calling)` commits are OMLX's generic XML tool protocol, not
+DSML. They are not applicable regardless of merit, since the checkpoint has no
+trained tool-call capability under either declared protocol.
+
+### Group VI — The provable non-change
+
+`omlx/patches/deepseek_v4/chat_template_v4.py` and
+`tool_parser_v4.py` have **zero commits** in `50846648..2450a53c`. The prompt
+protocol and the DSML reference parser are unchanged, so re-pinning the
+reference revision cannot invalidate the 16 committed goldens or Tasks 1
+through 5. This is the non-change proved in S1 by byte-identical hashes and the
+generator-input audit above.
