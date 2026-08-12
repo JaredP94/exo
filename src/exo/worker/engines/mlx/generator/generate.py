@@ -21,6 +21,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.constants import EXO_PROMPT_ADMISSION_CEILING
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import (
@@ -55,6 +56,7 @@ from exo.worker.engines.mlx.constants import (
     KV_GROUP_SIZE,
     MAX_TOKENS,
 )
+from exo.worker.engines.mlx.generator.admission import assert_prompt_within_ceiling
 from exo.worker.engines.mlx.generator.remote_prefill import remote_prefill
 from exo.worker.engines.mlx.types import KVCacheType, Model
 from exo.worker.engines.mlx.utils_mlx import (
@@ -556,6 +558,10 @@ def mlx_generate(
     )
     if task.raw_input_ids is None:
         all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
+    assert_prompt_within_ceiling(
+        prompt_tokens=int(all_prompt_tokens.shape[0]),
+        limit_tokens=EXO_PROMPT_ADMISSION_CEILING,
+    )
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None
@@ -576,6 +582,10 @@ def mlx_generate(
             )
     if vision is not None:
         all_prompt_tokens = vision.prompt_tokens
+        assert_prompt_within_ceiling(
+            prompt_tokens=int(all_prompt_tokens.shape[0]),
+            limit_tokens=EXO_PROMPT_ADMISSION_CEILING,
+        )
     media_regions: list[MediaRegion] = vision.media_regions if vision else []
 
     is_bench = task.bench
