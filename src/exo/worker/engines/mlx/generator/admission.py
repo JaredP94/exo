@@ -7,12 +7,11 @@ from exo.shared.constants import (
 class PromptTooLongError(ValueError):
     """A prompt exceeded the admission ceiling and was refused before allocation.
 
-    Raised rather than truncated because a 65,536-token prompt has been observed
-    to cause a kernel watchdog host panic: silently proceeding risks host
-    availability, and silently truncating would return an answer to a question
-    the caller did not ask. Both counts are carried as attributes and repeated in
-    the message because this error reaches the client as an opaque HTTP 500 --
-    the message is the caller's only diagnostic.
+    The default ceiling of 40,960 is a safety margin above the demonstrated
+    successful lengths through 32,828 and below the 65,536-token MLX panic
+    boundary. The 33,000-63,999 range remains untested; this is an admission
+    guard, not a claim that every prompt below the ceiling is supported. Raising
+    rather than truncating preserves the caller's prompt semantics.
     """
 
     def __init__(self, prompt_tokens: int, limit_tokens: int) -> None:
