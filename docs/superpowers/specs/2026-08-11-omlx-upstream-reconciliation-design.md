@@ -218,12 +218,12 @@ A silently-capped prompt would be the same defect class.
 
 ### Sequence
 
-S0 → S1 → S2 → S5 → S3 → S4.
+S0 → S1 → S2 → S5 → S4 → S3.
 
 S0 is unconditionally first. S1 and S2 are offline and independent. S5 precedes
 the perf pair because an unbounded prompt can currently take a host down, which
-outranks prefill latency. S3 precedes S4 so each throughput delta is attributable
-to one change.
+outranks prefill latency. S4 precedes S3 because S3's benefit is confined to
+prompts below roughly 2,048 tokens.
 
 ## The codex packet contract
 
