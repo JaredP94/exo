@@ -30,6 +30,7 @@ from exo.worker.engines.base import Engine
 from exo.worker.engines.mlx.cache import KVPrefixCache
 from exo.worker.engines.mlx.disaggregated.adapter import write_cache_to_wire
 from exo.worker.engines.mlx.disaggregated.serve import run_prefill_for_request
+from exo.worker.engines.mlx.generator.admission import PromptTooLongError
 from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
 from exo.worker.engines.mlx.generator.generate import (
     PrefillCancelled,
@@ -165,22 +166,34 @@ class SequentialGenerator(Engine):
     ) -> Iterator[
         tuple[TaskId, GenerationChunk | FinishedResponse | CancelledResponse]
     ]:
+        output: list[
+            tuple[TaskId, GenerationChunk | CancelledResponse | FinishedResponse]
+        ] = []
         if self._active is None:
             self.agree_on_tasks()
 
             if self._queue:
-                self._start_next()
-            else:
-                return map(
-                    lambda task: (task, CancelledResponse()), self._cancelled_tasks
+                refused_task = self._start_next()
+                if refused_task is not None:
+                    output.append((refused_task.task_id, FinishedResponse()))
+            if self._active is None:
+                return filter(
+                    lambda chunk: (
+                        not isinstance(chunk[1], GenerationChunk)
+                        or self.device_rank == 0
+                    ),
+                    itertools.chain(
+                        output,
+                        map(
+                            lambda task: (task, CancelledResponse()),
+                            self._cancelled_tasks,
+                        ),
+                    ),
                 )
 
         assert self._active is not None
 
         task, gen, queue, output_generator = self._active
-        output: list[
-            tuple[TaskId, GenerationChunk | CancelledResponse | FinishedResponse]
-        ] = []
         try:
             response = next(gen)
             queue.push(response)
@@ -192,7 +205,14 @@ class SequentialGenerator(Engine):
             output.append((task.task_id, FinishedResponse()))
             self._active = None
             if self._queue:
-                self._start_next()
+                refused_task = self._start_next()
+                if refused_task is not None:
+                    output.append((refused_task.task_id, FinishedResponse()))
+
+        except PromptTooLongError as e:
+            self._send_error(task, e)
+            self._active = None
+            output.append((task.task_id, FinishedResponse()))
 
         except Exception as e:
             self._send_error(task, e)
@@ -209,10 +229,13 @@ class SequentialGenerator(Engine):
             ),
         )
 
-    def _start_next(self) -> None:
+    def _start_next(self) -> TextGeneration | None:
         task = self._queue.popleft()
         try:
             gen = self._build_generator(task)
+        except PromptTooLongError as e:
+            self._send_error(task, e)
+            return task
         except Exception as e:
             self._send_error(task, e)
             raise
@@ -233,6 +256,7 @@ class SequentialGenerator(Engine):
                 task.task_params.tools,
             )
         self._active = (task, gen, queue, output_generator)
+        return None
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
         if self.device_rank == 0:
@@ -402,6 +426,9 @@ class BatchGenerator(Engine):
     ) -> Iterator[
         tuple[TaskId, GenerationChunk | CancelledResponse | FinishedResponse]
     ]:
+        output: list[
+            tuple[TaskId, GenerationChunk | CancelledResponse | FinishedResponse]
+        ] = []
         if not self._queue:
             self.agree_on_tasks()
 
@@ -411,6 +438,10 @@ class BatchGenerator(Engine):
             try:
                 uid = self._start_task(task)
             except PrefillCancelled:
+                continue
+            except PromptTooLongError as e:
+                self._send_error(task, e)
+                output.append((task.task_id, FinishedResponse()))
                 continue
             except Exception as e:
                 self._send_error(task, e)
@@ -434,13 +465,15 @@ class BatchGenerator(Engine):
             self._active_tasks[uid] = (task, queue, output_generator)
 
         if not self._gen.has_work:
-            return self._apply_cancellations()
+            return filter(
+                lambda chunk: (
+                    not isinstance(chunk[1], GenerationChunk) or self.device_rank == 0
+                ),
+                itertools.chain(output, self._apply_cancellations()),
+            )
 
         results = self._gen.step()
 
-        output: list[
-            tuple[TaskId, GenerationChunk | CancelledResponse | FinishedResponse]
-        ] = []
         for uid, response in results:
             if uid not in self._active_tasks:
                 # should we error here?

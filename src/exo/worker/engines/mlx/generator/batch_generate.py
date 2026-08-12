@@ -23,6 +23,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.constants import EXO_PROMPT_ADMISSION_CEILING
 from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.runner_response import GenerationResponse
@@ -33,6 +34,7 @@ from exo.worker.engines.mlx.cache import (
     make_kv_cache,
 )
 from exo.worker.engines.mlx.constants import DEFAULT_TOP_LOGPROBS, MAX_TOKENS
+from exo.worker.engines.mlx.generator.admission import assert_prompt_within_ceiling
 from exo.worker.engines.mlx.generator.generate import (
     ban_token_ids,
     eos_ids_from_tokenizer,
@@ -135,6 +137,10 @@ class ExoBatchGenerator:
             all_prompt_tokens = fix_unmatched_think_end_tokens(
                 all_prompt_tokens, self.tokenizer
             )
+        assert_prompt_within_ceiling(
+            prompt_tokens=int(all_prompt_tokens.shape[0]),
+            limit_tokens=EXO_PROMPT_ADMISSION_CEILING,
+        )
 
         vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
@@ -158,6 +164,10 @@ class ExoBatchGenerator:
         if vision is not None:
             all_prompt_tokens = vision.prompt_tokens
             media_regions = vision.media_regions
+            assert_prompt_within_ceiling(
+                prompt_tokens=int(all_prompt_tokens.shape[0]),
+                limit_tokens=EXO_PROMPT_ADMISSION_CEILING,
+            )
 
         is_bench = task_params.bench
 
