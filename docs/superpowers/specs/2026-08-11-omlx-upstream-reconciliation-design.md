@@ -55,11 +55,18 @@ SDPA fix; a pin change would force re-validation of that fix as well.
 
 Evidence for the two fork-level items, verified against `6a3df6c`:
 
-- `Indexer.__call__` (`mlx_lm/models/deepseek_v4.py:1799`) computes
-  `k = min(self.index_topk, idx_kv.shape[1])` and always runs the scoring einsum
-  and `argpartition`, including when `pooled_len <= index_topk`, where the
-  selection is the identity set. With `index_topk = 512`, that condition holds
-  for ratio-128 layers across the whole supported context range.
+- Correction to the original claim that the indexer shortcut condition held for
+  ratio-128 layers across the whole supported context range:
+  `deepseek_v4.py:2133-2137` calls the indexer only when `compress_ratio == 4`;
+  ratio-128 layers never call it. On ratio-4 layers,
+  `pooled_len = seq_len / 4`, so with `index_topk = 512` the shortcut fires only
+  up to roughly 2,048 tokens. It therefore does nothing for the 16K/32K
+  prefills and targets short-prompt latency — TTFT is 5.305 s on a 546-token
+  prompt, whose ratio-4 `pooled_len` is 136. The shortcut remains lossless: in
+  prefill (`S > 1`) the indices only build a mask (`:2192-2196`) and the
+  identity set makes `comp_mask & selected == comp_mask`; in decode (`S == 1`)
+  the gather yields the compressed rows in `arange` order, identical to the
+  non-gather branch at `:2172-2174`. Consequently S4 is sequenced before S3.
 - `_CompressorBranch` (`:1182`) grows the pooled buffer with
   `mx.concatenate([pool, new_pooled], axis=1)` on every update — the quadratic
   pattern upstream replaced with geometric append-in-place. This is a candidate
