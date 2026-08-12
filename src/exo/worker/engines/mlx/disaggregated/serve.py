@@ -4,6 +4,7 @@ import mlx.core as mx
 from mlx_lm.sample_utils import make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.constants import EXO_PROMPT_ADMISSION_CEILING
 from exo.worker.disaggregated.server import PrefillRequest
 from exo.worker.engines.mlx.cache import (
     KVPrefixCache,
@@ -11,6 +12,7 @@ from exo.worker.engines.mlx.cache import (
     make_kv_cache,
     snapshot_ssm_states,
 )
+from exo.worker.engines.mlx.generator.admission import assert_prompt_within_ceiling
 from exo.worker.engines.mlx.generator.generate import prefill as mlx_prefill
 from exo.worker.engines.mlx.types import KVCacheType, Model
 from exo.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
@@ -28,6 +30,10 @@ def run_prefill_for_request(
     prompt_tokens = mx.array(request.token_ids)
     prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
     n_tokens = int(prompt_tokens.shape[0])
+    assert_prompt_within_ceiling(
+        prompt_tokens=n_tokens,
+        limit_tokens=EXO_PROMPT_ADMISSION_CEILING,
+    )
     t0 = time.perf_counter()
 
     matched_index: int | None = None
